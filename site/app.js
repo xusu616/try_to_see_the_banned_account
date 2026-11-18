@@ -23,7 +23,15 @@ function sourceTag(value) {
   const url = httpsUrl(value, "github.com");
   const match = url.pathname.match(releasePath);
   if (!match || url.search || url.hash) throw new Error("Invalid Release or Tag URL");
-  return decodeURIComponent(match[1]);
+  const tag = decodeURIComponent(match[1]);
+  const invalidPart = tag.split("/").some((part) => !part || part.startsWith(".") || part.endsWith(".lock"));
+  if (
+    tag === "@" || tag.endsWith(".") || tag.includes("..") || tag.includes("@{") ||
+    /[\u0000-\u0020\u007f~^:?*\[\\]/.test(tag) || invalidPart
+  ) {
+    throw new Error("Invalid Git tag name");
+  }
+  return tag;
 }
 
 function avatarAddress(value) {
