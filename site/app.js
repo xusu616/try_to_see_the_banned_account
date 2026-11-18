@@ -7,9 +7,12 @@ const archiveStatus = document.querySelector("#archive-status");
 const form = document.querySelector("#card-form");
 const formStatus = document.querySelector("#form-status");
 const proposal = document.querySelector("#proposal");
+const avatarStatus = document.querySelector("#avatar-status");
 const contribute = document.querySelector("#contribute");
-const releasePath = /^\/[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*\/[A-Za-z0-9._-]+\/releases\/tag\/(.+)$/;
+const releasePath = /^\/([A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)\/([A-Za-z0-9._-]+)\/releases\/tag\/(.+)$/;
+const githubLogin = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/;
 let submittedFile;
+let activeLookup;
 
 function httpsUrl(value, hostname) {
   const url = new URL(value);
@@ -19,11 +22,12 @@ function httpsUrl(value, hostname) {
   return url;
 }
 
-function sourceTag(value) {
+function releaseSource(value) {
   const url = httpsUrl(value, "github.com");
   const match = url.pathname.match(releasePath);
   if (!match || url.search || url.hash) throw new Error("Invalid Release or Tag URL");
-  const tag = decodeURIComponent(match[1]);
+  const [, owner, repo, encodedTag] = match;
+  const tag = decodeURIComponent(encodedTag);
   const invalidPart = tag.split("/").some((part) => !part || part.startsWith(".") || part.endsWith(".lock"));
   if (
     tag === "@" || tag.endsWith(".") || tag.includes("..") || tag.includes("@{") ||
@@ -31,7 +35,7 @@ function sourceTag(value) {
   ) {
     throw new Error("Invalid Git tag name");
   }
-  return tag;
+  return { owner, repo, tag };
 }
 
 function avatarAddress(value) {
@@ -42,6 +46,29 @@ function avatarAddress(value) {
   return url.href;
 }
 
+function showAvatar(image, address) {
+  image.src = avatarAddress(address);
+  image.hidden = false;
+}
+
+async function findReleaseAuthor({ owner, repo, tag }, request) {
+  const endpoint = `https://api.github.com/repos/${owner}/${repo}/releases/tags/${encodeURIComponent(tag)}`;
+  const timeout = setTimeout(() => request.abort(), 5000);
+  try {
+    const response = await fetch(endpoint, { signal: request.signal });
+    if (!response.ok) return null;
+    const { author } = await response.json();
+    if (typeof author?.login !== "string" || author.login.length > 39 || !githubLogin.test(author.login)) {
+      return null;
+    }
+    return author;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function cardElement(card) {
   const element = cardTemplate.content.firstElementChild.cloneNode(true);
   element.querySelector(".profile-name").textContent = card.name;
@@ -50,7 +77,7 @@ function cardElement(card) {
 
   const avatar = element.querySelector("img");
   avatar.addEventListener("error", () => { avatar.hidden = true; }, { once: true });
-  avatar.src = avatarAddress(card.avatarUrl);
+  if (card.avatarUrl) showAvatar(avatar, card.avatarUrl);
 
   if (card.badge) {
     const badge = element.querySelector(".profile-badge");
@@ -63,7 +90,7 @@ function cardElement(card) {
     bio.textContent = card.bio;
   }
 
-  const tag = sourceTag(card.releaseUrl);
+  const { tag } = releaseSource(card.releaseUrl);
   element.querySelector(".release-tag").textContent = tag;
   const releaseLink = element.querySelector(".release-link");
   releaseLink.href = card.releaseUrl;
@@ -120,34 +147,55 @@ if (location.hash === "#contribute") contribute.open = true;
 form.elements.observedAt.value = localDate();
 
 form.addEventListener("input", () => {
+  activeLookup?.abort();
+  activeLookup = undefined;
   proposal.hidden = true;
   formStatus.hidden = true;
 });
 
-form.addEventListener("submit", (event) => {
+form.addEventListener("submit", async (event) => {
   event.preventDefault();
   proposal.hidden = true;
+  formStatus.hidden = true;
+  avatarStatus.hidden = true;
+  activeLookup?.abort();
+  const lookup = new AbortController();
+  activeLookup = lookup;
 
   const input = new FormData(form);
-  const login = input.get("login").trim();
+  let login = input.get("login").trim();
   let releaseUrl;
-  let tag;
+  let source;
   try {
     releaseUrl = httpsUrl(input.get("releaseUrl").trim(), "github.com").href;
-    tag = sourceTag(releaseUrl);
+    source = releaseSource(releaseUrl);
   } catch {
     formStatus.textContent = "请填写 GitHub 的 Release 或 Tag 链接，去掉链接末尾的查询参数和锚点。";
     formStatus.hidden = false;
     return;
   }
 
-  let avatarUrl;
+  let avatarUrl = input.get("avatarUrl").trim();
   try {
-    avatarUrl = avatarAddress(input.get("avatarUrl").trim());
+    if (avatarUrl) avatarUrl = avatarAddress(avatarUrl);
   } catch {
     formStatus.textContent = "请填写 avatars.githubusercontent.com/u/ 下的公开 GitHub 头像链接。";
     formStatus.hidden = false;
     return;
+  }
+
+  let author;
+  if (!login) {
+    formStatus.textContent = "正在读取 Release 的署名…";
+    formStatus.hidden = false;
+    author = await findReleaseAuthor(source, lookup);
+    if (activeLookup !== lookup) return;
+    if (!author) {
+      formStatus.textContent = "未能自动读取署名。请填写来源页上显示的 GitHub 用户名。";
+      return;
+    }
+    login = author.login;
+    form.elements.login.value = login;
   }
 
   const record = {
@@ -159,7 +207,7 @@ form.addEventListener("submit", (event) => {
     releaseUrl,
     observedAt: input.get("observedAt"),
   };
-  const filename = filenameFor(login, tag, releaseUrl);
+  const filename = filenameFor(login, source.tag, releaseUrl);
   const value = `${JSON.stringify(record, null, 2)}\n`;
   submittedFile = { filename, value };
 
@@ -167,9 +215,30 @@ form.addEventListener("submit", (event) => {
   editor.search = new URLSearchParams({ filename, value });
   document.querySelector("#github-editor").href = editor.href;
   document.querySelector("#proposal-filename").textContent = `cards/${filename}`;
-  document.querySelector("#preview").replaceChildren(cardElement(record));
+  const previewCard = cardElement(record);
+  document.querySelector("#preview").replaceChildren(previewCard);
   formStatus.hidden = true;
   proposal.hidden = false;
+
+  if (avatarUrl) return;
+  avatarStatus.textContent = "正在读取 Release 的头像…";
+  avatarStatus.hidden = false;
+  author ??= await findReleaseAuthor(source, lookup);
+  if (activeLookup !== lookup) return;
+  if (author && author.login.toLowerCase() !== login.toLowerCase()) {
+    avatarStatus.textContent = `这个 Release 的署名账号是 @${author.login}。请核对填写的用户名。`;
+    return;
+  }
+  if (author?.avatar_url) {
+    try {
+      showAvatar(previewCard.querySelector("img"), author.avatar_url);
+      avatarStatus.hidden = true;
+      return;
+    } catch {
+      // The preview keeps the login initial when the response uses another avatar host.
+    }
+  }
+  avatarStatus.textContent = "当前预览使用用户名首字母，PR 构建时会尝试从来源页读取头像。";
 });
 
 document.querySelector("#download-json").addEventListener("click", () => {

@@ -20,7 +20,9 @@ python -X utf8 .\find-profile-cards.pyz rD227 --starred xusu616 --max-tags 10
 
 ## 添加一张卡片
 
-打开 [GitHub Pages](https://xusu616.github.io/try_to_see_the_banned_account/) 的提交表单，填写公开 GitHub Release 或 Tag 链接和页面里能看到的资料。预览确认后，表单会打开 GitHub 编辑器。保存到分支并创建 PR，便可在 Actions 中查看校验结果或下载 `pages-preview`。合并后站点会自动更新。
+打开 [GitHub Pages](https://xusu616.github.io/try_to_see_the_banned_account/) 的提交表单，填写任意公开仓库的 GitHub Release 或 Tag 链接和页面里能看到的资料。正式 Release 可自动读取署名和头像。只有 Git Tag 时，填写页面上显示的署名，构建会尝试从同一条署名读取头像。头像地址可以留空，查不到时会显示用户名首字母。
+
+预览确认后，表单会打开 GitHub 编辑器。保存到分支并创建 PR，便可在 Actions 中查看校验结果或下载 `pages-preview`。合并后站点会自动更新。
 
 也可以直接在 `cards/` 添加一份 JSON。文件名使用小写字母、数字、点和连字符。同一来源 URL 只需一条记录。[示例数据](cards/rd227-v1.1.0-ksun-susfs.json)
 

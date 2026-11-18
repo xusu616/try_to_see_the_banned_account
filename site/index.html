@@ -48,13 +48,13 @@
               <input type="url" name="releaseUrl" placeholder="https://github.com/owner/repo/releases/tag/v1.0.0" maxlength="350" required>
             </label>
             <label>GitHub 用户名
-              <input name="login" placeholder="rD227" pattern="[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*" maxlength="39" autocapitalize="off" autocomplete="off" spellcheck="false" required>
+              <input name="login" placeholder="正式 Release 可留空" pattern="[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*" maxlength="39" autocapitalize="off" autocomplete="off" spellcheck="false">
             </label>
             <label>显示名称
               <input name="name" maxlength="100" autocomplete="off">
             </label>
-            <label class="full-width">公开头像地址
-              <input type="url" name="avatarUrl" placeholder="https://avatars.githubusercontent.com/u/…" maxlength="300" required>
+            <label class="full-width">公开头像地址（选填）
+              <input type="url" name="avatarUrl" placeholder="留空时从来源页读取" maxlength="300">
             </label>
             <label class="full-width">简介
               <textarea name="bio" maxlength="500" rows="3" placeholder="保留原卡片上的文字或链接，可分行"></textarea>
@@ -70,6 +70,7 @@
           <p id="form-status" role="status" hidden></p>
           <div id="proposal" hidden>
             <div id="preview"></div>
+            <p class="filename" id="avatar-status" role="status" hidden></p>
             <div class="proposal-actions">
               <a class="button" id="github-editor" target="_blank" rel="noopener">到 GitHub 提交 <span aria-hidden="true">↗</span></a>
               <button type="button" class="soft-button" id="download-json">下载 JSON</button>
@@ -88,7 +89,7 @@
       <div class="profile-identity">
         <div class="avatar-frame">
           <span class="avatar-initial" aria-hidden="true"></span>
-          <img width="64" height="64" alt="" loading="lazy" referrerpolicy="no-referrer">
+          <img width="64" height="64" alt="" loading="lazy" referrerpolicy="no-referrer" hidden>
         </div>
         <div class="identity-text">
           <h3 class="profile-name"></h3>

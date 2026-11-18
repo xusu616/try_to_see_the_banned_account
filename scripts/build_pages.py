@@ -1,13 +1,17 @@
 import argparse
 from datetime import date
+from html.parser import HTMLParser
 import json
 from pathlib import Path
 import re
 import shutil
+from urllib.error import URLError
 from urllib.parse import unquote
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
-FIELDS = {"login", "name", "avatarUrl", "bio", "badge", "releaseUrl", "observedAt"}
+REQUIRED_FIELDS = {"login", "name", "bio", "badge", "releaseUrl", "observedAt"}
+OPTIONAL_FIELDS = {"avatarUrl"}
 SITE_FILES = ("index.html", "styles.css", "app.js")
 LOGIN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*", re.IGNORECASE | re.ASCII)
 CARD_ID = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,98}[a-z0-9])?")
@@ -19,6 +23,72 @@ RELEASE_URL = re.compile(
     r"https://github\.com/([^/]+)/([^/]+)/releases/tag/"
     r"((?:[A-Za-z0-9._~!$&'()*+,;=:@/-]|%[0-9A-Fa-f]{2})+)"
 )
+MAX_RELEASE_HTML = 2 * 1024 * 1024
+
+
+class ReleaseAvatarParser(HTMLParser):
+    """Read the public avatar from a Release or Tag byline."""
+
+    def __init__(self, login):
+        super().__init__()
+        self.login = login.casefold()
+        self.row_depth = 0
+        self.avatars = set()
+
+    def handle_starttag(self, tag, attributes):
+        attributes = dict(attributes)
+        classes = set((attributes.get("class") or "").split())
+        if tag == "div":
+            if self.row_depth:
+                self.row_depth += 1
+            elif {"tmp-mr-4", "mb-2"} <= classes:
+                self.row_depth = 1
+                self.row_avatar = ""
+                self.row_user = False
+                self.row_signature = False
+        if self.row_depth != 1:
+            return
+        if tag == "img" and (attributes.get("alt") or "").casefold() == f"@{self.login}":
+            avatar = attributes.get("src") or ""
+            if "avatar" in classes and AVATAR_URL.fullmatch(avatar):
+                self.row_avatar = avatar
+        if tag == "a" and attributes.get("data-hovercard-type") == "user":
+            self.row_user |= (attributes.get("href") or "").casefold() == f"/{self.login}"
+
+    def handle_data(self, data):
+        if self.row_depth == 1 and self.row_user:
+            text = " ".join(data.split())
+            self.row_signature |= "released this" in text or "tagged this" in text
+
+    def handle_endtag(self, tag):
+        if tag == "div" and self.row_depth:
+            self.row_depth -= 1
+            if not self.row_depth and self.row_avatar and self.row_user and self.row_signature:
+                self.avatars.add(self.row_avatar)
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def release_avatar(url, login):
+    request = Request(url, headers={"Accept": "text/html", "User-Agent": "GitHub-Profile-Card-Build"})
+    try:
+        # Read only the public, validated source page, even if GitHub redirects it.
+        with build_opener(NoRedirect()).open(request, timeout=5) as response:
+            if response.headers.get_content_type() != "text/html":
+                return ""
+            body = response.read(MAX_RELEASE_HTML + 1)
+        if len(body) > MAX_RELEASE_HTML:
+            return ""
+    except (URLError, TimeoutError):
+        return ""
+
+    parser = ReleaseAvatarParser(login)
+    parser.feed(body.decode("utf-8", errors="replace"))
+    parser.close()
+    return next(iter(parser.avatars)) if len(parser.avatars) == 1 else ""
 
 
 def valid_login(login):
@@ -69,8 +139,8 @@ def load_card(path):
     if path.is_symlink():
         raise ValueError("资料卡须为 JSON 文件")
     card = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=reject_repeated_fields)
-    if not isinstance(card, dict) or set(card) != FIELDS:
-        raise ValueError(f"须包含且只包含这些字段：{', '.join(sorted(FIELDS))}")
+    if not isinstance(card, dict) or not REQUIRED_FIELDS <= card.keys() <= REQUIRED_FIELDS | OPTIONAL_FIELDS:
+        raise ValueError(f"必填字段：{', '.join(sorted(REQUIRED_FIELDS))}。可选字段：avatarUrl")
     if any(not isinstance(value, str) for value in card.values()):
         raise ValueError("所有资料卡字段须为字符串")
 
@@ -82,7 +152,8 @@ def load_card(path):
     validate_text(card["bio"], "bio", 500, multiline=True)
     if card["badge"] not in {"", "PRO"}:
         raise ValueError("badge 须为空字符串或 PRO")
-    if not AVATAR_URL.fullmatch(card["avatarUrl"]):
+    card.setdefault("avatarUrl", "")
+    if card["avatarUrl"] and not AVATAR_URL.fullmatch(card["avatarUrl"]):
         raise ValueError("avatarUrl 须为 avatars.githubusercontent.com 上的公开用户头像链接")
     if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", card["observedAt"]):
         raise ValueError("observedAt 须用 YYYY-MM-DD 格式")
@@ -118,6 +189,12 @@ def build(root, output):
     for source in static_files:
         if not source.is_file() or source.is_symlink():
             raise ValueError(f"缺少站点文件 site/{source.name}")
+
+    for card in cards:
+        if not card["avatarUrl"]:
+            card["avatarUrl"] = release_avatar(card["releaseUrl"], card["login"])
+            if not card["avatarUrl"]:
+                print(f"{card['id']}: 公开来源页未找到对应署名的头像，将显示用户名首字母。")
 
     output.mkdir(parents=True, exist_ok=True)
     for source in static_files:
