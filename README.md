@@ -1,6 +1,6 @@
 # GitHub 资料卡存档
 
-批量查找公开 GitHub Tag、Issue、PR 和提交页面里还能展开资料卡的署名。站点用提交到仓库的公开资料重绘卡片，并保留每条记录的来源链接。
+批量查找公开 GitHub Tag、Issue、PR 和提交页面里还能展开资料卡的署名。站点用提交到仓库的公开资料重绘卡片，并保留每条记录的来源链接。在站点输入 GitHub 用户名即可查看该账号已收录的卡片。[查看 rD227](https://xusu616.github.io/try_to_see_the_banned_account/?login=rD227)
 
 ## 下载和运行
 

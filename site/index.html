@@ -34,6 +34,12 @@
         <h2 id="archive-heading">已收录卡片</h2>
         <a id="all-cards" href="./" hidden>查看全部</a>
       </div>
+      <form id="archive-lookup" action="./" method="get" role="search" aria-label="查找已收录的资料卡">
+        <label>GitHub 用户名
+          <input id="archive-login" type="search" name="login" placeholder="例如 rD227" pattern=" *@?[A-Za-z0-9]+(?:-[A-Za-z0-9]+)* *" maxlength="42" autocomplete="off" autocapitalize="off" enterkeyhint="search" spellcheck="false" required>
+        </label>
+        <button type="submit">查找卡片</button>
+      </form>
       <p id="archive-status" role="status">正在载入资料卡…</p>
       <div id="card-grid" class="card-grid"></div>
     </section>

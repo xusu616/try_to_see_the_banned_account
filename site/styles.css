@@ -46,6 +46,7 @@ nav a:hover { text-decoration: underline; }
 
 .section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; padding-block: .7rem; border-top: 1px solid var(--line); }
 .section-heading h2 { margin: 0; font-size: .9rem; letter-spacing: .08em; }
+#archive-lookup { grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: .55rem; max-width: 25rem; margin: .25rem 0 1rem; }
 #archive-status { margin: 1rem 0 0; color: var(--muted); }
 .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr)); gap: 1rem; }
 .card-grid:has(> :only-child) { grid-template-columns: minmax(0, 34rem); }

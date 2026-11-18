@@ -106,16 +106,27 @@ function cardElement(card) {
 }
 
 async function loadArchive() {
-  const requestedCard = new URLSearchParams(location.search).get("card");
-  if (requestedCard) document.querySelector("#all-cards").hidden = false;
+  const parameters = new URLSearchParams(location.search);
+  const requestedCard = parameters.get("card");
+  const requestedLogin = (parameters.get("login") ?? "").trim().replace(/^@/, "");
+  if (requestedCard || requestedLogin) document.querySelector("#all-cards").hidden = false;
+  if (githubLogin.test(requestedLogin)) document.querySelector("#archive-login").value = requestedLogin;
 
   try {
     const response = await fetch("./cards.json");
     if (!response.ok) throw new Error("无法读取已发布的资料卡");
     const cards = await response.json();
-    const visibleCards = requestedCard ? cards.filter((card) => card.id === requestedCard) : cards;
+    let visibleCards = cards;
+    if (requestedCard) {
+      visibleCards = cards.filter((card) => card.id === requestedCard);
+    } else if (requestedLogin) {
+      const login = requestedLogin.toLowerCase();
+      visibleCards = cards.filter((card) => card.login.toLowerCase() === login);
+    }
     if (!visibleCards.length) {
-      archiveStatus.textContent = requestedCard ? "没有找到这张资料卡。" : "还没有收录资料卡。";
+      if (requestedCard) archiveStatus.textContent = "没有找到这张资料卡。";
+      else if (requestedLogin) archiveStatus.textContent = "档案里暂未收录这个用户名。";
+      else archiveStatus.textContent = "还没有收录资料卡。";
       return;
     }
     grid.replaceChildren(...visibleCards.map(cardElement));
