@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="保存仍可从 GitHub 公开 Tag 页面查看的资料卡。">
+  <title>GitHub 资料卡档案</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="wordmark" href="./" aria-label="GitHub 资料卡档案首页">
+        <span class="wordmark-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        资料卡档案
+      </a>
+      <nav aria-label="站点导航">
+        <a href="https://github.com/xusu616/try_to_see_the_banned_account/releases/latest">下载工具 <span aria-hidden="true">↗</span></a>
+        <a class="nav-highlight" id="contribute-link" href="#contribute">提交卡片</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero" aria-labelledby="page-heading">
+      <p class="eyebrow">GITHUB 公开资料快照</p>
+      <h1 id="page-heading">资料卡档案</h1>
+      <p>查看从 GitHub Release 或 Tag 页面记录的资料。点击卡片里的来源，可以在原页面悬浮查看。</p>
+    </section>
+
+    <section class="archive" aria-labelledby="archive-heading">
+      <div class="section-heading">
+        <h2 id="archive-heading">已收录卡片</h2>
+        <a id="all-cards" href="./" hidden>查看全部</a>
+      </div>
+      <p id="archive-status" role="status">正在载入资料卡…</p>
+      <div id="card-grid" class="card-grid"></div>
+    </section>
+
+    <section class="submission" aria-labelledby="contribute-heading">
+      <details id="contribute">
+        <summary id="contribute-heading">提交新的 Release 或 Tag <span aria-hidden="true"></span></summary>
+        <div class="submission-body">
+          <p>填写你有权公开的资料卡信息。生成预览后，在 GitHub 选择新分支并创建 PR。合并后卡片会出现在这里。</p>
+          <form id="card-form">
+            <label class="full-width">GitHub Release 或 Tag 链接
+              <input type="url" name="releaseUrl" placeholder="https://github.com/owner/repo/releases/tag/v1.0.0" maxlength="350" required>
+            </label>
+            <label>GitHub 用户名
+              <input name="login" placeholder="rD227" pattern="[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*" maxlength="39" autocapitalize="off" autocomplete="off" spellcheck="false" required>
+            </label>
+            <label>显示名称
+              <input name="name" maxlength="100" autocomplete="off">
+            </label>
+            <label class="full-width">公开头像地址
+              <input type="url" name="avatarUrl" placeholder="https://avatars.githubusercontent.com/u/…" maxlength="300" required>
+            </label>
+            <label class="full-width">简介
+              <textarea name="bio" maxlength="500" rows="3" placeholder="保留原卡片上的文字或链接，可分行"></textarea>
+            </label>
+            <label>记录日期
+              <input type="date" name="observedAt" min="0001-01-01" max="9999-12-31" required>
+            </label>
+            <label>标记
+              <select name="badge"><option value="">无</option><option value="PRO">PRO</option></select>
+            </label>
+            <button type="submit">生成卡片预览</button>
+          </form>
+          <p id="form-status" role="status" hidden></p>
+          <div id="proposal" hidden>
+            <div id="preview"></div>
+            <div class="proposal-actions">
+              <a class="button" id="github-editor" target="_blank" rel="noopener">到 GitHub 提交 <span aria-hidden="true">↗</span></a>
+              <button type="button" class="soft-button" id="download-json">下载 JSON</button>
+            </div>
+            <p class="filename">文件路径 <code id="proposal-filename"></code></p>
+          </div>
+        </div>
+      </details>
+    </section>
+  </main>
+
+  <footer><a href="https://github.com/xusu616/try_to_see_the_banned_account">查看项目源码 <span aria-hidden="true">↗</span></a></footer>
+
+  <template id="card-template">
+    <article class="profile-card">
+      <div class="profile-identity">
+        <div class="avatar-frame">
+          <span class="avatar-initial" aria-hidden="true"></span>
+          <img width="64" height="64" alt="" loading="lazy" referrerpolicy="no-referrer">
+        </div>
+        <div class="identity-text">
+          <h3 class="profile-name"></h3>
+          <p class="profile-login"></p>
+        </div>
+        <span class="profile-badge" hidden></span>
+      </div>
+      <p class="profile-bio" hidden></p>
+      <div class="profile-source">
+        <a class="release-link" target="_blank" rel="noopener"><span class="release-tag"></span><span aria-hidden="true">↗</span></a>
+        <div class="card-meta"><time></time><a class="permalink">单卡链接</a></div>
+      </div>
+    </article>
+  </template>
+</body>
+</html>
