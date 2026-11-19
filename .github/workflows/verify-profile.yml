@@ -61,6 +61,7 @@ jobs:
           python -m pip install playwright==1.65.2
           python -m playwright install --with-deps chromium
       - name: Update release, hover public contributor, and publish result
+        if: ${{ !cancelled() }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python scripts/verify_profile.py

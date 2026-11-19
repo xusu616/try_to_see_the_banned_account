@@ -3,110 +3,69 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="保存仍可从 GitHub 公开 Tag 页面查看的资料卡。">
-  <title>GitHub 资料卡档案</title>
+  <meta name="description" content="输入 GitHub 用户名，实时核验 Release 页中的公开资料卡。">
+  <title>GitHub 资料卡查询</title>
   <link rel="stylesheet" href="./styles.css">
   <script src="./app.js" defer></script>
 </head>
 <body>
   <header class="topbar">
     <div class="topbar-inner">
-      <a class="wordmark" href="./" aria-label="GitHub 资料卡档案首页">
+      <a class="wordmark" href="./" aria-label="资料卡查询首页">
         <span class="wordmark-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-        资料卡档案
+        资料卡查询
       </a>
-      <nav aria-label="站点导航">
-        <a href="https://github.com/xusu616/try_to_see_the_banned_account/releases/latest">下载工具 <span aria-hidden="true">↗</span></a>
-        <a class="nav-highlight" id="contribute-link" href="#contribute">提交卡片</a>
-      </nav>
+      <a class="source-link" href="https://github.com/xusu616/try_to_see_the_banned_account" target="_blank" rel="noopener">项目源码</a>
     </div>
   </header>
-
   <main>
     <section class="hero" aria-labelledby="page-heading">
-      <p class="eyebrow">GITHUB 公开资料快照</p>
-      <h1 id="page-heading">资料卡档案</h1>
-      <p>查看从 GitHub Release 或 Tag 页面记录的资料。点击卡片里的来源，可以在原页面悬浮查看。</p>
+      <p class="eyebrow">GITHUB 公开资料卡</p>
+      <h1 id="page-heading">输入用户名，<br>看看资料卡。</h1>
+      <p class="intro">实时核验 GitHub Release 原页中的公开资料。核验成功后，在这里查看头像、名称和简介。</p>
     </section>
-
-    <section class="archive" aria-labelledby="archive-heading">
-      <div class="section-heading">
-        <h2 id="archive-heading">已收录卡片</h2>
-        <a id="all-cards" href="./" hidden>查看全部</a>
-      </div>
-      <form id="archive-lookup" action="./" method="get" role="search" aria-label="查找已收录的资料卡">
-        <label>GitHub 用户名
-          <input id="archive-login" type="search" name="login" placeholder="例如 rD227" pattern=" *@?[A-Za-z0-9]+(?:-[A-Za-z0-9]+)* *" maxlength="42" autocomplete="off" autocapitalize="off" enterkeyhint="search" spellcheck="false" required>
-        </label>
-        <button type="submit">查找卡片</button>
-      </form>
-      <p id="archive-status" role="status">正在载入资料卡…</p>
-      <div id="card-grid" class="card-grid"></div>
-    </section>
-
-    <section class="submission" aria-labelledby="contribute-heading">
-      <details id="contribute">
-        <summary id="contribute-heading">提交新的 Release 或 Tag <span aria-hidden="true"></span></summary>
-        <div class="submission-body">
-          <p>填写你有权公开的资料卡信息。生成预览后，在 GitHub 选择新分支并创建 PR。合并后卡片会出现在这里。</p>
-          <form id="card-form">
-            <label class="full-width">GitHub Release 或 Tag 链接
-              <input type="url" name="releaseUrl" placeholder="https://github.com/owner/repo/releases/tag/v1.0.0" maxlength="350" required>
-            </label>
-            <label>GitHub 用户名
-              <input name="login" placeholder="正式 Release 可留空" pattern="[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*" maxlength="39" autocapitalize="off" autocomplete="off" spellcheck="false">
-            </label>
-            <label>显示名称
-              <input name="name" maxlength="100" autocomplete="off">
-            </label>
-            <label class="full-width">公开头像地址（选填）
-              <input type="url" name="avatarUrl" placeholder="留空时从来源页读取" maxlength="300">
-            </label>
-            <label class="full-width">简介
-              <textarea name="bio" maxlength="500" rows="3" placeholder="保留原卡片上的文字或链接，可分行"></textarea>
-            </label>
-            <label>记录日期
-              <input type="date" name="observedAt" min="0001-01-01" max="9999-12-31" required>
-            </label>
-            <label>标记
-              <select name="badge"><option value="">无</option><option value="PRO">PRO</option></select>
-            </label>
-            <button type="submit">生成卡片预览</button>
-          </form>
-          <p id="form-status" role="status" hidden></p>
-          <div id="proposal" hidden>
-            <div id="preview"></div>
-            <p class="filename" id="avatar-status" role="status" hidden></p>
-            <div class="proposal-actions">
-              <a class="button" id="github-editor" target="_blank" rel="noopener">到 GitHub 提交 <span aria-hidden="true">↗</span></a>
-              <button type="button" class="soft-button" id="download-json">下载 JSON</button>
-            </div>
-            <p class="filename">文件路径 <code id="proposal-filename"></code></p>
-          </div>
+    <section class="lookup" aria-labelledby="lookup-heading">
+      <h2 id="lookup-heading">查询 GitHub 用户</h2>
+      <form id="lookup-form" role="search">
+        <label for="github-login">GitHub 用户名</label>
+        <div class="input-row">
+          <div class="input-wrap"><span aria-hidden="true">@</span><input id="github-login" name="login" placeholder="例如 rD227" maxlength="42" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" aria-describedby="submit-hint" required></div>
+          <button id="lookup-button" type="submit">查询资料卡</button>
         </div>
-      </details>
+        <p class="hint" id="submit-hint">将在 GitHub 确认提交一次，随后自动等待结果。</p>
+        <p class="hint privacy-hint">需登录 GitHub；用户名和查询请求将作为公开 Issue 发布。</p>
+      </form>
     </section>
+    <section id="result-section" class="result-section" aria-label="查询结果" hidden>
+      <div id="request-status" class="request-status" data-state="waiting" role="status" aria-live="polite" aria-atomic="true">
+        <span class="status-dot" aria-hidden="true"></span>
+        <div><p id="status-title"></p><p id="status-detail" class="status-detail"></p></div>
+      </div>
+      <div class="request-actions">
+        <a id="submit-link" class="text-action" target="_blank" rel="noopener" hidden>打开 GitHub 提交页面</a>
+        <a id="issue-link" class="text-action" target="_blank" rel="noopener" hidden>查看查询请求</a>
+        <button id="share-button" class="soft-button" type="button" hidden>复制结果链接</button>
+        <button id="resume-button" class="soft-button" type="button" hidden>继续等待</button>
+      </div>
+      <p id="share-status" class="hint" role="status" hidden></p>
+      <div id="card-result"></div>
+    </section>
+    <p class="source-note">核验来源：<a href="https://github.com/xusu616/try_to_see_the_banned_account/releases/tag/v0.1.1" target="_blank" rel="noopener">Release v0.1.1</a><br>结果仅表示本次来源页的可见情况。</p>
   </main>
-
-  <footer><a href="https://github.com/xusu616/try_to_see_the_banned_account">查看项目源码 <span aria-hidden="true">↗</span></a></footer>
-
   <template id="card-template">
     <article class="profile-card">
       <div class="profile-identity">
         <div class="avatar-frame">
           <span class="avatar-initial" aria-hidden="true"></span>
-          <img width="64" height="64" alt="" loading="lazy" referrerpolicy="no-referrer" hidden>
+          <img width="72" height="72" alt="" referrerpolicy="no-referrer" hidden>
         </div>
-        <div class="identity-text">
-          <h3 class="profile-name"></h3>
-          <p class="profile-login"></p>
-        </div>
+        <div class="identity-text"><h2 class="profile-name"></h2><p class="profile-login"></p></div>
         <span class="profile-badge" hidden></span>
       </div>
       <p class="profile-bio" hidden></p>
       <div class="profile-source">
-        <a class="release-link" target="_blank" rel="noopener"><span class="release-tag"></span><span aria-hidden="true">↗</span></a>
-        <div class="card-meta"><time></time><a class="permalink">单卡链接</a></div>
+        <a class="release-link" href="https://github.com/xusu616/try_to_see_the_banned_account/releases/tag/v0.1.1" target="_blank" rel="noopener">查看 Release 原页</a>
+        <time></time>
       </div>
     </article>
   </template>

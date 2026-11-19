@@ -198,8 +198,9 @@ class ResultTests(unittest.TestCase):
     def test_error_posts_explicit_result_closes_request_and_fails_job(self):
         client = Mock()
         client.comments.return_value = []
-        with patch("scripts.verify_profile.update_release"), patch("scripts.verify_profile.observe_profile", side_effect=RuntimeError("secret credentials")):
+        with patch("scripts.verify_profile.update_release"), patch("scripts.verify_profile.observe_profile", side_effect=RuntimeError("secret credentials")), patch("scripts.verify_profile.traceback.print_exception") as diagnostic:
             self.assertEqual(run_verification(client, self.request), 1)
+        self.assertFalse(diagnostic.call_args.kwargs["chain"])
         method, path, payload = client.request.call_args_list[0].args
         self.assertEqual((method, path), ("POST", "/issues/42/comments"))
         self.assertIn('"status": "error"', payload["body"])

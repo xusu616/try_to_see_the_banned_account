@@ -1,6 +1,10 @@
-# GitHub 资料卡存档
+# GitHub 资料卡验证
 
-批量查找公开 GitHub Tag、Issue、PR 和提交页面里还能展开资料卡的署名。站点用提交到仓库的公开资料重绘卡片，并保留每条记录的来源链接。在站点输入 GitHub 用户名即可查看该账号已收录的卡片。[查看 rD227](https://xusu616.github.io/try_to_see_the_banned_account/?login=rD227)
+在[在线验证页面](https://xusu616.github.io/try_to_see_the_banned_account/)输入 GitHub 用户名，确认一张已填写的 GitHub 请求单，页面便会自动等待验证结果。
+
+后台会在现有 `v0.1.1` 发布说明里加入该用户名的 `@提及`，通过正常的公开页面交互展开贡献者资料卡，再把读取到的头像、名称、简介及 PRO 标记返回到网页。结果保留来源链接和记录时间。
+
+需要使用 GitHub 登录确认请求。GitHub Pages 托管页面，Actions 使用运行时的仓库权限处理请求。普通访客可以打开已完成的请求链接查看结果。
 
 ## 下载和运行
 
@@ -18,15 +22,14 @@ python -X utf8 .\find-profile-cards.pyz rD227 --starred xusu616 --max-tags 10
 
 打开生成的 `profile-card-links.html`，在来源页悬浮对应署名即可查看 GitHub 资料卡。
 
-## 添加一张卡片
+## 验证流程
 
-打开 [GitHub Pages](https://xusu616.github.io/try_to_see_the_banned_account/) 的提交表单，填写任意公开仓库的 GitHub Release 或 Tag 链接和页面里能看到的资料。正式 Release 可自动读取署名和头像。只有 Git Tag 时，填写页面上显示的署名，构建会尝试从同一条署名读取头像。头像地址可以留空，查不到时会显示用户名首字母。
+1. 输入 GitHub 用户名，点击开始验证。
+2. 在打开的 GitHub 页面点击提交请求，返回网站等待。
+3. 工作流按顺序更新同一个 Release，并读取对应贡献者的公开卡片。
+4. 验证结果显示后，可分享请求结果的链接。
 
-预览确认后，表单会打开 GitHub 编辑器。保存到分支并创建 PR，便可在 Actions 中查看校验结果或下载 `pages-preview`。合并后站点会自动更新。
-
-也可以直接在 `cards/` 添加一份 JSON。文件名使用小写字母、数字、点和连字符。同一来源 URL 只需一条记录。[示例数据](cards/rd227-v1.1.0-ksun-susfs.json)
-
-首次发布时，在 [仓库 Pages 设置](https://github.com/xusu616/try_to_see_the_banned_account/settings/pages) 将构建来源设为 **GitHub Actions**，然后运行 [Pages 工作流](https://github.com/xusu616/try_to_see_the_banned_account/actions/workflows/pages.yml)。
+GitHub Actions 排队和页面更新需要时间，页面会持续检查进度。限流、网络失败或资料卡暂未出现时，页面会显示实际状态。后台只接受格式有效的用户名和请求编号，修改固定仓库的现有 Release，结果评论由 `github-actions[bot]` 发布。
 
 ## 本地构建
 
