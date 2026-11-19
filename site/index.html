@@ -55,8 +55,10 @@
     <section class="card-gallery" aria-labelledby="gallery-heading">
       <div class="gallery-heading"><h2 id="gallery-heading">查询成功的账号</h2><p id="card-count"></p></div>
       <div id="current-card" class="card-list"></div>
-      <p id="gallery-status" class="hint" role="status" aria-live="polite">正在读取已核验账号…</p>
-      <button id="gallery-retry" class="soft-button" type="button" hidden>重新读取账号列表</button>
+      <div class="gallery-notice">
+        <p id="gallery-status" class="hint" role="status" aria-live="polite">正在读取已核验账号…</p>
+        <button id="gallery-retry" class="soft-button" type="button" hidden>重新读取账号列表</button>
+      </div>
       <div id="card-result" class="card-list"></div>
     </section>
     <p class="source-note">核验来源：<a href="https://github.com/xusu616/try_to_see_the_banned_account/releases/tag/v0.1.1" target="_blank" rel="noopener">Release v0.1.1</a><br>结果仅表示本次来源页的可见情况。</p>

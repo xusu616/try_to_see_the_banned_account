@@ -49,3 +49,7 @@ python -m http.server 8765 --bind 127.0.0.1 --directory dist
 ```
 
 访问 `http://127.0.0.1:8765/` 即可预览。`python scripts/package_tool.py --output dist-tool` 会生成工具与 SHA-256 校验文件。推送版本 Tag 后，Release 工作流会重新打包并发布对应版本。
+
+直接用浏览器打开 `site/index.html` 时，会从已发布网站读取公开账号列表；浏览器无法通过 `file://` 读取相邻的 JSON 文件。通过 HTTP 访问构建目录时，读取该目录的账号数据，本地未同步数据库时显示空列表。
+
+构建后的 HTML 引用带内容指纹的 CSS 和 JS 文件，避免浏览器或 CDN 将新版页面与旧版资源混用。账号列表读取失败时会结束加载并显示重读按钮；重读会同时刷新列表元数据和分页缓存。

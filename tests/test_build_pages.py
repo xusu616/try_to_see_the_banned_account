@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -45,3 +46,32 @@ class ReleaseAvatarTests(unittest.TestCase):
             lookup.assert_called_once_with(SOURCE, "rD227")
             records = json.loads((root / "dist" / "cards.json").read_text(encoding="utf-8"))
             self.assertEqual(records[0]["avatarUrl"], AVATAR)
+
+    def test_published_html_references_matching_fingerprinted_assets(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "cards").mkdir()
+            (root / "site").mkdir()
+            (root / "site" / "index.html").write_text(
+                '<link href="./styles.css"><script src="./app.js" defer></script>', encoding="utf-8"
+            )
+            css, script = "body { color: green; }", "console.log('first');"
+            (root / "site" / "styles.css").write_text(css, encoding="utf-8")
+            (root / "site" / "app.js").write_text(script, encoding="utf-8")
+            output = root / "dist"
+            build(root, output)
+            first_html = (output / "index.html").read_text(encoding="utf-8")
+            first_assets = re.findall(r'\./([^" ]+)', first_html)
+            self.assertEqual(len(first_assets), 2)
+            for filename, content in zip(first_assets, (css, script)):
+                self.assertRegex(filename, r"^(styles|app)\.[0-9a-f]{16}\.(css|js)$")
+                self.assertEqual((output / filename).read_text(encoding="utf-8"), content)
+            build(root, output)
+            self.assertEqual((output / "index.html").read_text(encoding="utf-8"), first_html)
+            (root / "site" / "app.js").write_text("console.log('second');", encoding="utf-8")
+            build(root, output)
+            second_assets = re.findall(r'\./([^" ]+)', (output / "index.html").read_text(encoding="utf-8"))
+            self.assertEqual(second_assets[0], first_assets[0])
+            self.assertNotEqual(second_assets[1], first_assets[1])
+            self.assertEqual((output / second_assets[1]).read_text(encoding="utf-8"), "console.log('second');")
+            self.assertEqual((output / first_assets[1]).read_text(encoding="utf-8"), script)

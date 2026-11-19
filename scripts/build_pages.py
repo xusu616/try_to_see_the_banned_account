@@ -1,11 +1,11 @@
 import argparse
 from contextlib import closing
 from datetime import date
+import hashlib
 from html.parser import HTMLParser
 import json
 from pathlib import Path
 import re
-import shutil
 import sys
 from urllib.error import URLError
 from urllib.parse import unquote
@@ -202,8 +202,16 @@ def build(root, output):
                 print(f"{card['id']}: 公开来源页未找到对应署名的头像，将显示用户名首字母。")
 
     output.mkdir(parents=True, exist_ok=True)
-    for source in static_files:
-        shutil.copyfile(source, output / source.name)
+    # Each HTML document names the exact CSS/JS bytes it was built with. An older
+    # browser or CDN cache cannot substitute assets from another deployment.
+    html = static_files[0].read_text(encoding="utf-8")
+    for source in static_files[1:]:
+        content = source.read_bytes()
+        fingerprint = hashlib.sha256(content).hexdigest()[:16]
+        filename = f"{source.stem}.{fingerprint}{source.suffix}"
+        (output / filename).write_bytes(content)
+        html = html.replace(f'./{source.name}', f'./{filename}')
+    (output / "index.html").write_bytes(html.encode("utf-8"))
     (output / "cards.json").write_text(json.dumps(cards, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     # Local previews start with an empty verified index; CI replaces it with its
     # incremental SQLite snapshot. Legacy hand-written cards are not verified results.

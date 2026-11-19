@@ -3,6 +3,10 @@
 const repository = "https://github.com/xusu616/try_to_see_the_banned_account";
 const api = "https://api.github.com/repos/xusu616/try_to_see_the_banned_account";
 const releaseUrl = `${repository}/releases/tag/v0.1.1`;
+const publicSite = "https://xusu616.github.io/try_to_see_the_banned_account/";
+// file:// cannot fetch adjacent JSON. Direct local previews use the same public
+// snapshot as the published site; HTTP previews read their own generated files.
+const profileRoot = new URL("profiles/", location.protocol === "file:" ? publicSite : new URL("./", location.href));
 const requestMarker = "<!-- profile-card-request -->";
 const resultMarker = "<!-- profile-card-result -->";
 const loginPattern = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/;
@@ -37,7 +41,6 @@ let cardPage = 1;
 let galleryLoading = false;
 let galleryError = "";
 let galleryLoadId = 0;
-let requestedCardPage = 1;
 let activeRequest;
 
 class ApiError extends Error {
@@ -289,7 +292,7 @@ async function loadProfileIndex() {
   if (profileIndex) return profileIndex;
   if (!indexPromise) {
     const request = { controller: new AbortController() };
-    indexPromise = readJson("./profiles/index.json", request).then((index) => {
+    indexPromise = readJson(new URL("index.json", profileRoot).href, request).then((index) => {
       if (!index || !Number.isSafeInteger(index.total) || index.total < 0 ||
           !Number.isSafeInteger(index.pageSize) || index.pageSize < 1 ||
           index.pageCount !== Math.max(1, Math.ceil(index.total / index.pageSize))) {
@@ -313,7 +316,6 @@ function validateIndexedProfile(profile) {
 
 async function loadGallery(page = cardPage) {
   const loadId = ++galleryLoadId;
-  requestedCardPage = page;
   galleryLoading = true;
   galleryError = "";
   renderGallery();
@@ -321,7 +323,7 @@ async function loadGallery(page = cardPage) {
   try {
     await loadProfileIndex();
     if (!galleryPages.has(page)) {
-      const profiles = await readJson(`./profiles/pages/${page}.json`, request);
+      const profiles = await readJson(new URL(`pages/${page}.json`, profileRoot).href, request);
       const expectedCount = Math.min(profileIndex.pageSize, profileIndex.total - (page - 1) * profileIndex.pageSize);
       if (!Array.isArray(profiles) || profiles.length !== expectedCount) throw new Error("Invalid profile page");
       const validated = profiles.map(validateIndexedProfile);
@@ -330,7 +332,11 @@ async function loadGallery(page = cardPage) {
     }
     if (loadId === galleryLoadId) cardPage = page;
   } catch (error) {
-    if (loadId === galleryLoadId) galleryError = "已核验账号列表读取失败，请重新读取。";
+    if (loadId === galleryLoadId) {
+      galleryError = error instanceof ApiError && error.status === 404
+        ? "账号列表尚未发布，请稍后重新读取。"
+        : "账号列表暂时无法读取，请重新读取。";
+    }
   } finally {
     if (loadId === galleryLoadId) {
       galleryLoading = false;
@@ -342,6 +348,17 @@ async function loadGallery(page = cardPage) {
 async function changeCardPage(page) {
   await loadGallery(page);
   document.querySelector("#gallery-heading").scrollIntoView({ block: "start" });
+}
+
+function reloadGallery() {
+  // A publication can change both the index and its pages. Retry the complete
+  // snapshot rather than retaining metadata from the failed read.
+  profileIndex = undefined;
+  galleryPages.clear();
+  verifiedProfiles.clear();
+  if (currentProfile) rememberVerified(currentProfile, currentProfile.issueNumber);
+  cardPage = 1;
+  return loadGallery(1);
 }
 
 function complete(request, result) {
@@ -458,7 +475,7 @@ form.addEventListener("submit", async (event) => {
     if (!current(request)) return;
     let profile = verifiedProfiles.get(login.toLowerCase());
     if (!profile && !excludedProfiles.has(login.toLowerCase())) {
-      const indexed = await readJson(`./profiles/users/${login.toLowerCase()}.json`, request, true);
+      const indexed = await readJson(new URL(`users/${login.toLowerCase()}.json`, profileRoot).href, request, true);
       if (indexed) profile = validateIndexedProfile(indexed);
     }
     if (!current(request)) return;
@@ -481,7 +498,7 @@ loginInput.addEventListener("input", () => loginInput.setCustomValidity(""));
 previousPage.addEventListener("click", () => changeCardPage(cardPage - 1));
 nextPage.addEventListener("click", () => changeCardPage(cardPage + 1));
 pageSelect.addEventListener("change", () => changeCardPage(Number(pageSelect.value)));
-galleryRetry.addEventListener("click", () => loadGallery(requestedCardPage));
+galleryRetry.addEventListener("click", reloadGallery);
 refreshButton.addEventListener("click", () => {
   const login = activeRequest.login;
   resetRequest();
