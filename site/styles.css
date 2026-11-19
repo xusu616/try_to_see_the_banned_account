@@ -117,7 +117,7 @@ a:focus-visible { outline: none; box-shadow: 0 0 0 4px rgb(65 142 114 / 20%); }
   .input-row { flex-direction: column; gap: .6rem; }
   .lookup-title { display: grid; gap: .25rem; }
   .intro-tip { width: auto; }
-  .pagination { display: grid; grid-template-columns: auto 1fr auto; gap: .65rem; }
+  .pagination { display: grid; grid-template-columns: auto 6.75rem auto; justify-content: center; gap: .5rem; }
   .pagination label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .pagination select { width: 100%; max-width: none; }
   #page-summary { grid-column: 1 / -1; grid-row: 2; text-align: center; color: var(--muted); }
