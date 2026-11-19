@@ -6,6 +6,10 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  workflow_run:
+    workflows: [Verify public profile card]
+    types: [completed]
+    branches: [main]
 
 permissions: {}
 
@@ -15,9 +19,11 @@ concurrency:
 
 jobs:
   build:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      issues: read
     steps:
       - uses: actions/checkout@v7
         with:
@@ -29,6 +35,33 @@ jobs:
         run: python -m unittest discover -s tests
       - name: Build static site
         run: python scripts/build_pages.py --output "$RUNNER_TEMP/profile-cards"
+      - name: Restore verified-profile database
+        if: github.event_name != 'pull_request'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/profiles.sqlite
+          key: profile-index-v3-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: profile-index-v3-
+      - name: Sync only comments changed since the previous build
+        if: github.event_name != 'pull_request'
+        id: profile-index
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python -m scripts.profile_index --database "$RUNNER_TEMP/profiles.sqlite" --output "$RUNNER_TEMP/profile-cards" --sync
+      - name: Install Chromium for old biography migration
+        if: steps.profile-index.outputs.needs_bio_refresh == 'true'
+        run: |
+          python -m pip install playwright==1.65.2
+          python -m playwright install --with-deps chromium
+      - name: Re-read old biographies from existing release contributors
+        if: steps.profile-index.outputs.needs_bio_refresh == 'true'
+        run: python -m scripts.profile_index --database "$RUNNER_TEMP/profiles.sqlite" --output "$RUNNER_TEMP/profile-cards" --refresh-bios
+      - name: Save verified-profile database
+        if: github.event_name != 'pull_request'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/profiles.sqlite
+          key: profile-index-v3-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Upload PR preview
         if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@v7

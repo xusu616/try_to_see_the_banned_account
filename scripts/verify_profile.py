@@ -11,7 +11,7 @@ import sys
 import traceback
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 from uuid import UUID
 
 
@@ -44,6 +44,32 @@ class ProfileRequest:
 
 def valid_login(login):
     return isinstance(login, str) and 1 <= len(login) <= 39 and USERNAME.fullmatch(login) is not None
+
+
+class NoProfileRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def profile_page_status(login):
+    if not valid_login(login):
+        raise VerificationError("The GitHub login is invalid.")
+    request = Request(
+        f"https://github.com/{login}",
+        headers={"Accept": "text/html", "User-Agent": "Public-Profile-Card-Verification"},
+    )
+    try:
+        # Check the original profile URL. A redirect to another 404 is not eligible.
+        with build_opener(NoProfileRedirect()).open(request, timeout=15) as response:
+            return response.status
+    except HTTPError as error:
+        status = error.code
+        error.close()
+        if status in (403, 429) or status >= 500:
+            raise VerificationError(f"The profile page check returned HTTP {status}; its visibility could not be confirmed.") from None
+        return status
+    except (URLError, TimeoutError) as error:
+        raise VerificationError("The profile page could not be checked; its visibility is unknown.") from error
 
 
 def parse_request(issue):
@@ -192,7 +218,8 @@ def read_hovercard(card, login):
     name_link = identity.locator("a.Link--secondary")
     name = name_link.first.inner_text().strip() if name_link.count() else ""
     bio_region = card.get_by_role("region", name="User bio", exact=True)
-    bio = bio_region.inner_text().strip() if bio_region.count() else ""
+    # inner_text follows GitHub's CSS and can collapse newlines in the public bio.
+    bio = bio_region.text_content().strip() if bio_region.count() else ""
     avatar = card.get_by_role("region", name="User avatar", exact=True).locator("img").first
     avatar_url = avatar.get_attribute("src")
     if not is_avatar_url(avatar_url):
@@ -202,7 +229,7 @@ def read_hovercard(card, login):
     return {"name": name, "bio": bio, "avatarUrl": avatar_url, "badge": badge}
 
 
-def observe_profile(login):
+def observe_profile(login, client=None):
     # The browser has a fresh anonymous context. The REST token is never provided to it.
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 
@@ -211,7 +238,8 @@ def observe_profile(login):
         try:
             page = browser.new_page(locale="en-US", viewport={"width": 1280, "height": 900})
             page.set_default_timeout(15000)
-            for attempt in range(6):
+            updated = False
+            for attempt in range(7 if client else 1):
                 response = page.goto(RELEASE_URL, wait_until="domcontentloaded", timeout=30000)
                 if response is None or response.status >= 400 or page.url != RELEASE_URL:
                     raise VerificationError("GitHub's public release page could not be loaded.")
@@ -229,7 +257,11 @@ def observe_profile(login):
                     except PlaywrightTimeoutError:
                         return {"status": "unavailable", "message": "GitHub did not show a public hovercard for this contributor."}
                     return {"status": "verified", "message": "Read from the contributor's native GitHub hovercard.", **read_hovercard(card, login)}
-                if attempt < 5:
+                if client and not updated:
+                    # Read existing contributors first; only a missing login needs a notes edit.
+                    update_release(client, login)
+                    updated = True
+                elif attempt < 6 and client:
                     # GitHub updates the native Contributors list asynchronously after a notes edit.
                     page.wait_for_timeout(5000)
             return {"status": "unavailable", "message": "GitHub did not expose this login in the public Contributors list after the release update."}
@@ -249,6 +281,8 @@ def make_result(request, observation):
         "releaseUrl": RELEASE_URL,
         "observedAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "message": observation["message"],
+        "bioFormatVersion": 2,
+        "profilePageStatus": observation.get("profilePageStatus"),
     }
 
 
@@ -276,7 +310,7 @@ def previous_result(comments, request):
         if (
             isinstance(result, dict) and result.get("requestId") == request.request_id
             and result.get("login") == request.login and result.get("releaseUrl") == RELEASE_URL
-            and result.get("status") in ("verified", "unavailable", "error")
+            and result.get("status") in ("verified", "unavailable", "error", "excluded")
         ):
             return comment, result
     return None, None
@@ -291,16 +325,25 @@ def finish_request(client, request, result, comment=None):
     client.request("PATCH", f"/issues/{request.issue_number}", {"state": "closed"})
 
 
-def run_verification(client, request):
+def run_verification(client, request, refresh=False):
     comment, prior = previous_result(list(client.comments(request.issue_number)), request)
-    if prior and prior["status"] in ("verified", "unavailable"):
-        client.request("PATCH", f"/issues/{request.issue_number}", {"state": "closed"})
-        return 0
-    stage = "updating the fixed release notes"
+    stage = "checking the original profile page's HTTP status"
     try:
-        update_release(client, request.login)
-        stage = "reading the native public hovercard"
-        observation = observe_profile(request.login)
+        page_status = profile_page_status(request.login)
+        if page_status != 404:
+            observation = {
+                "status": "excluded", "profilePageStatus": page_status,
+                "message": f"GitHub profile page returned HTTP {page_status}; only profiles returning HTTP 404 can enter the gallery.",
+            }
+        elif prior and not refresh and (
+            prior["status"] == "unavailable"
+            or prior["status"] == "verified" and prior.get("bioFormatVersion") == 2 and prior.get("profilePageStatus") == 404
+        ):
+            client.request("PATCH", f"/issues/{request.issue_number}", {"state": "closed"})
+            return 0
+        else:
+            stage = "checking the existing release contributor and reading its public hovercard"
+            observation = {**observe_profile(request.login, client), "profilePageStatus": 404}
     except Exception as error:
         # This is the job's reporting boundary: publish an explicit error and fail the run.
         # Browser/network/DOM failures must never become a successful or unavailable result.
@@ -317,6 +360,7 @@ def run_verification(client, request):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--validate", action="store_true", help="Validate the event without modifying GitHub or loading a browser.")
+    parser.add_argument("--refresh", action="store_true", help="Refresh an existing request's successful result.")
     args = parser.parse_args()
     try:
         event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
@@ -335,7 +379,7 @@ def main():
         print(f"Validated request #{request.issue_number}.")
         return 0
     try:
-        return run_verification(client, request)
+        return run_verification(client, request, refresh=args.refresh)
     except VerificationError as error:
         print(str(error), file=sys.stderr)
         return 1

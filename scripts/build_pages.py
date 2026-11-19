@@ -1,13 +1,18 @@
 import argparse
+from contextlib import closing
 from datetime import date
 from html.parser import HTMLParser
 import json
 from pathlib import Path
 import re
 import shutil
+import sys
 from urllib.error import URLError
 from urllib.parse import unquote
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 REQUIRED_FIELDS = {"login", "name", "bio", "badge", "releaseUrl", "observedAt"}
@@ -200,6 +205,11 @@ def build(root, output):
     for source in static_files:
         shutil.copyfile(source, output / source.name)
     (output / "cards.json").write_text(json.dumps(cards, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    # Local previews start with an empty verified index; CI replaces it with its
+    # incremental SQLite snapshot. Legacy hand-written cards are not verified results.
+    from scripts.profile_index import export_index, open_index
+    with closing(open_index(":memory:")) as connection:
+        export_index(connection, output)
     return len(cards)
 
 

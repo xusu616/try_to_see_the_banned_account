@@ -17,40 +17,56 @@
       </a>
       <a class="source-link" href="https://github.com/xusu616/try_to_see_the_banned_account" target="_blank" rel="noopener">项目源码</a>
     </div>
+    <div class="lookup-panel">
+      <section class="lookup" aria-labelledby="lookup-heading">
+        <h2 id="lookup-heading">查询 GitHub 用户</h2>
+        <form id="lookup-form" role="search">
+          <label for="github-login">GitHub 用户名</label>
+          <div class="input-row">
+            <div class="input-wrap"><span aria-hidden="true">@</span><input id="github-login" name="login" placeholder="例如 rD227" maxlength="42" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" aria-describedby="submit-hint" required></div>
+            <button id="lookup-button" type="submit">查询资料卡</button>
+          </div>
+          <p class="hint" id="submit-hint">优先查询已核验资料；未收录时再到 GitHub 确认提交，随后自动等待结果。</p>
+          <p class="hint privacy-hint">需登录 GitHub；用户名和查询请求将作为公开 Issue 发布。</p>
+        </form>
+      </section>
+      <section id="result-section" class="result-section" aria-label="查询结果" hidden>
+        <div id="request-status" class="request-status" data-state="waiting" role="status" aria-live="polite" aria-atomic="true">
+          <span class="status-dot" aria-hidden="true"></span>
+          <div><p id="status-title"></p><p id="status-detail" class="status-detail"></p></div>
+        </div>
+        <div class="request-actions">
+          <a id="submit-link" class="text-action" target="_blank" rel="noopener" hidden>打开 GitHub 提交页面</a>
+          <a id="issue-link" class="text-action" target="_blank" rel="noopener" hidden>查看查询请求</a>
+          <button id="share-button" class="soft-button" type="button" hidden>复制结果链接</button>
+          <button id="resume-button" class="soft-button" type="button" hidden>继续等待</button>
+          <button id="refresh-button" class="soft-button" type="button" hidden>重新核验资料</button>
+        </div>
+        <p id="share-status" class="hint" role="status" hidden></p>
+      </section>
+    </div>
   </header>
   <main>
     <section class="hero" aria-labelledby="page-heading">
       <p class="eyebrow">GITHUB 公开资料卡</p>
-      <h1 id="page-heading">输入用户名，<br>看看资料卡。</h1>
-      <p class="intro">实时核验 GitHub Release 原页中的公开资料。核验成功后，在这里查看头像、名称和简介。</p>
+      <h1 id="page-heading">英灵殿</h1>
+      <p class="intro">这里收录主页返回 404、且资料卡核验成功的账号。每张卡片保留 Release 来源和核验时间。</p>
     </section>
-    <section class="lookup" aria-labelledby="lookup-heading">
-      <h2 id="lookup-heading">查询 GitHub 用户</h2>
-      <form id="lookup-form" role="search">
-        <label for="github-login">GitHub 用户名</label>
-        <div class="input-row">
-          <div class="input-wrap"><span aria-hidden="true">@</span><input id="github-login" name="login" placeholder="例如 rD227" maxlength="42" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" aria-describedby="submit-hint" required></div>
-          <button id="lookup-button" type="submit">查询资料卡</button>
-        </div>
-        <p class="hint" id="submit-hint">将在 GitHub 确认提交一次，随后自动等待结果。</p>
-        <p class="hint privacy-hint">需登录 GitHub；用户名和查询请求将作为公开 Issue 发布。</p>
-      </form>
-    </section>
-    <section id="result-section" class="result-section" aria-label="查询结果" hidden>
-      <div id="request-status" class="request-status" data-state="waiting" role="status" aria-live="polite" aria-atomic="true">
-        <span class="status-dot" aria-hidden="true"></span>
-        <div><p id="status-title"></p><p id="status-detail" class="status-detail"></p></div>
-      </div>
-      <div class="request-actions">
-        <a id="submit-link" class="text-action" target="_blank" rel="noopener" hidden>打开 GitHub 提交页面</a>
-        <a id="issue-link" class="text-action" target="_blank" rel="noopener" hidden>查看查询请求</a>
-        <button id="share-button" class="soft-button" type="button" hidden>复制结果链接</button>
-        <button id="resume-button" class="soft-button" type="button" hidden>继续等待</button>
-      </div>
-      <p id="share-status" class="hint" role="status" hidden></p>
-      <div id="card-result"></div>
+    <section class="card-gallery" aria-labelledby="gallery-heading">
+      <div class="gallery-heading"><h2 id="gallery-heading">查询成功的账号</h2><p id="card-count"></p></div>
+      <div id="current-card" class="card-list"></div>
+      <p id="gallery-status" class="hint" role="status" aria-live="polite">正在读取已核验账号…</p>
+      <button id="gallery-retry" class="soft-button" type="button" hidden>重新读取账号列表</button>
+      <div id="card-result" class="card-list"></div>
     </section>
     <p class="source-note">核验来源：<a href="https://github.com/xusu616/try_to_see_the_banned_account/releases/tag/v0.1.1" target="_blank" rel="noopener">Release v0.1.1</a><br>结果仅表示本次来源页的可见情况。</p>
+    <nav id="card-pagination" class="pagination" aria-label="账号卡片分页">
+      <button id="previous-page" class="soft-button" type="button" disabled>上一页</button>
+      <label for="page-select">页码</label>
+      <select id="page-select" disabled><option value="1">第 1 页</option></select>
+      <span id="page-summary" role="status" aria-live="polite">第 1 页</span>
+      <button id="next-page" class="soft-button" type="button" disabled>下一页</button>
+    </nav>
   </main>
   <template id="card-template">
     <article class="profile-card">
@@ -65,6 +81,7 @@
       <p class="profile-bio" hidden></p>
       <div class="profile-source">
         <a class="release-link" href="https://github.com/xusu616/try_to_see_the_banned_account/releases/tag/v0.1.1" target="_blank" rel="noopener">查看 Release 原页</a>
+        <a class="card-request-link" target="_blank" rel="noopener">查看核验结果</a>
         <time></time>
       </div>
     </article>

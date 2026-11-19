@@ -19,6 +19,25 @@ const shareButton = document.querySelector("#share-button");
 const resumeButton = document.querySelector("#resume-button");
 const shareStatus = document.querySelector("#share-status");
 const cardResult = document.querySelector("#card-result");
+const cardCount = document.querySelector("#card-count");
+const galleryStatus = document.querySelector("#gallery-status");
+const galleryRetry = document.querySelector("#gallery-retry");
+const refreshButton = document.querySelector("#refresh-button");
+const previousPage = document.querySelector("#previous-page");
+const nextPage = document.querySelector("#next-page");
+const pageSelect = document.querySelector("#page-select");
+const pageSummary = document.querySelector("#page-summary");
+const verifiedProfiles = new Map();
+const galleryPages = new Map();
+const excludedProfiles = new Set();
+let currentProfile;
+let profileIndex;
+let indexPromise;
+let cardPage = 1;
+let galleryLoading = false;
+let galleryError = "";
+let galleryLoadId = 0;
+let requestedCardPage = 1;
 let activeRequest;
 
 class ApiError extends Error {
@@ -51,11 +70,11 @@ function resetRequest() {
     clearTimeout(activeRequest.timer);
   }
   activeRequest = undefined;
-  cardResult.replaceChildren();
   submitLink.hidden = true;
   issueLink.hidden = true;
   shareButton.hidden = true;
   resumeButton.hidden = true;
+  refreshButton.hidden = true;
   shareStatus.hidden = true;
 }
 
@@ -100,15 +119,22 @@ function retryTime(response) {
 }
 
 async function requestJson(path, request) {
+  return readJson(`${api}${path}`, request);
+}
+
+async function readJson(url, request, allowMissing = false) {
   const controller = new AbortController();
   const abort = () => controller.abort();
+  if (request.controller.signal.aborted) controller.abort();
   request.controller.signal.addEventListener("abort", abort, { once: true });
   const timeout = setTimeout(abort, 15000);
   try {
-    const response = await fetch(`${api}${path}`, {
-      signal: controller.signal, cache: "no-store",
-      headers: { Accept: "application/vnd.github+json" },
+    const githubRequest = url.startsWith(api);
+    const response = await fetch(url, {
+      signal: controller.signal, cache: githubRequest ? "no-store" : "no-cache",
+      headers: { Accept: githubRequest ? "application/vnd.github+json" : "application/json" },
     });
+    if (allowMissing && response.status === 404) return null;
     if (!response.ok) throw new ApiError(response.status, retryTime(response));
     return await response.json();
   } finally {
@@ -139,23 +165,34 @@ function safeAvatar(value) {
 }
 
 function parseResult(comment, request) {
-  if (comment?.user?.login !== "github-actions[bot]" || typeof comment.body !== "string" || !comment.body.startsWith(resultMarker)) return null;
+  if (comment?.user?.login !== "github-actions[bot]" || comment.user.type !== "Bot" ||
+      typeof comment.body !== "string" || !comment.body.startsWith(resultMarker)) return null;
   const fenced = comment.body.match(/```json\s*\n([\s\S]*?)\n```/);
   if (!fenced) return null;
   let result;
   try { result = JSON.parse(fenced[1]); } catch { return null; }
   if (!result || typeof result !== "object" || result.requestId !== request.requestId ||
       typeof result.login !== "string" || result.login.toLowerCase() !== request.login.toLowerCase()) return null;
-  if (!["verified", "unavailable", "error"].includes(result.status)) throw new Error("Invalid result status");
-  if (result.status === "verified") {
-    if (result.releaseUrl !== releaseUrl || typeof result.name !== "string" || typeof result.bio !== "string" ||
-        typeof result.avatarUrl !== "string" || typeof result.badge !== "string" ||
-        typeof result.observedAt !== "string" || !Number.isFinite(Date.parse(result.observedAt))) {
-      throw new Error("Invalid profile result");
+  if (!["verified", "unavailable", "error", "excluded"].includes(result.status)) throw new Error("Invalid result status");
+  if (result.status === "verified") validateProfileFields(result);
+  if (result.status === "excluded") {
+    validateProfileFields(result);
+    if (!Number.isInteger(result.profilePageStatus) || result.profilePageStatus < 200 ||
+        result.profilePageStatus >= 500 || [403, 404, 429].includes(result.profilePageStatus)) {
+      throw new Error("Invalid exclusion status");
     }
-    result.avatarUrl = safeAvatar(result.avatarUrl);
   }
   return result;
+}
+
+function validateProfileFields(result) {
+  if (result.releaseUrl !== releaseUrl || typeof result.name !== "string" || typeof result.bio !== "string" ||
+        typeof result.avatarUrl !== "string" || typeof result.badge !== "string" ||
+        !["", "PRO"].includes(result.badge) ||
+        typeof result.observedAt !== "string" || !Number.isFinite(Date.parse(result.observedAt))) {
+    throw new Error("Invalid profile result");
+  }
+  result.avatarUrl = safeAvatar(result.avatarUrl);
 }
 
 async function findResult(request) {
@@ -171,6 +208,11 @@ async function findResult(request) {
   }
 }
 
+function profileBio(value) {
+  // Some public bios contain the literal characters backslash + n instead of LF.
+  return value.replace(/\\r\\n|\\n|\\r/g, "\n");
+}
+
 function renderCard(result) {
   const card = document.querySelector("#card-template").content.firstElementChild.cloneNode(true);
   card.querySelector(".profile-name").textContent = result.name || result.login;
@@ -184,7 +226,7 @@ function renderCard(result) {
   }
   if (result.bio) {
     const bio = card.querySelector(".profile-bio");
-    bio.textContent = result.bio;
+    bio.textContent = profileBio(result.bio);
     bio.hidden = false;
   }
   if (result.badge) {
@@ -195,15 +237,137 @@ function renderCard(result) {
   const time = card.querySelector("time");
   time.dateTime = result.observedAt;
   time.textContent = `核验于 ${new Date(result.observedAt).toLocaleString("zh-CN", { hour12: false })}`;
-  cardResult.replaceChildren(card);
+  card.querySelector(".card-request-link").href = `?${new URLSearchParams({ request: String(result.issueNumber) })}`;
+  return card;
+}
+
+function rememberVerified(result, issueNumber) {
+  if (result.status !== "verified" || result.profilePageStatus !== 404) return;
+  const key = result.login.toLowerCase();
+  if (excludedProfiles.has(key)) return;
+  const previous = verifiedProfiles.get(key);
+  if (!previous || Date.parse(result.observedAt) >= Date.parse(previous.observedAt)) {
+    verifiedProfiles.set(key, { ...result, issueNumber });
+  }
+}
+
+function renderGallery() {
+  const pageCount = profileIndex?.pageCount || 1;
+  const profiles = (galleryPages.get(cardPage) || []).filter((profile) => !excludedProfiles.has(profile.login.toLowerCase()));
+  cardResult.replaceChildren(...profiles.map((profile) => renderCard(verifiedProfiles.get(profile.login.toLowerCase()) || profile)));
+  const currentCard = document.querySelector("#current-card");
+  const showCurrent = currentProfile && !profiles.some((profile) => profile.login.toLowerCase() === currentProfile.login.toLowerCase());
+  currentCard.replaceChildren(...(showCurrent ? [renderCard(currentProfile)] : []));
+  cardCount.textContent = profileIndex ? `${excludedProfiles.size ? "列表更新中" : `${profileIndex.total} 个账号`} · 每页 ${profileIndex.pageSize} 个` : "";
+  const options = Array.from({ length: pageCount }, (_, index) => {
+    const option = document.createElement("option");
+    option.value = String(index + 1);
+    option.textContent = `第 ${index + 1} 页`;
+    return option;
+  });
+  pageSelect.replaceChildren(...options);
+  pageSelect.value = String(cardPage);
+  pageSelect.disabled = pageCount === 1;
+  previousPage.disabled = cardPage === 1;
+  nextPage.disabled = cardPage === pageCount;
+  pageSummary.textContent = `第 ${cardPage} / ${pageCount} 页`;
+  galleryRetry.hidden = !galleryError;
+  galleryRetry.disabled = galleryLoading;
+  galleryStatus.hidden = !galleryLoading && !galleryError && !excludedProfiles.size && profiles.length > 0;
+  if (galleryLoading) {
+    galleryStatus.textContent = "正在读取已核验账号…";
+  } else if (galleryError) {
+    galleryStatus.textContent = galleryError;
+  } else if (excludedProfiles.size) {
+    galleryStatus.textContent = "不符合条件的账号已移除，账号数量和分页将在发布后更新。";
+  } else {
+    galleryStatus.textContent = profileIndex?.total ? "新核验结果已显示，账号列表将在发布后更新。" : "还没有主页返回 404 且资料卡核验成功的账号。可在顶栏发起查询。";
+  }
+}
+
+async function loadProfileIndex() {
+  if (profileIndex) return profileIndex;
+  if (!indexPromise) {
+    const request = { controller: new AbortController() };
+    indexPromise = readJson("./profiles/index.json", request).then((index) => {
+      if (!index || !Number.isSafeInteger(index.total) || index.total < 0 ||
+          !Number.isSafeInteger(index.pageSize) || index.pageSize < 1 ||
+          index.pageCount !== Math.max(1, Math.ceil(index.total / index.pageSize))) {
+        throw new Error("Invalid profile index");
+      }
+      profileIndex = index;
+      return index;
+    }).finally(() => { indexPromise = undefined; });
+  }
+  return indexPromise;
+}
+
+function validateIndexedProfile(profile) {
+  if (!profile || profile.status !== "verified" || profile.profilePageStatus !== 404 || normalizedLogin(profile.login || "") !== profile.login ||
+      !Number.isSafeInteger(profile.issueNumber) || profile.issueNumber < 1 ||
+      !uuidPattern.test(profile.requestId || "")) throw new Error("Invalid indexed profile");
+  // Snapshot files are published by the repository's trusted indexing workflow.
+  validateProfileFields(profile);
+  return profile;
+}
+
+async function loadGallery(page = cardPage) {
+  const loadId = ++galleryLoadId;
+  requestedCardPage = page;
+  galleryLoading = true;
+  galleryError = "";
+  renderGallery();
+  const request = { controller: new AbortController() };
+  try {
+    await loadProfileIndex();
+    if (!galleryPages.has(page)) {
+      const profiles = await readJson(`./profiles/pages/${page}.json`, request);
+      const expectedCount = Math.min(profileIndex.pageSize, profileIndex.total - (page - 1) * profileIndex.pageSize);
+      if (!Array.isArray(profiles) || profiles.length !== expectedCount) throw new Error("Invalid profile page");
+      const validated = profiles.map(validateIndexedProfile);
+      for (const profile of validated) rememberVerified(profile, profile.issueNumber);
+      galleryPages.set(page, validated);
+    }
+    if (loadId === galleryLoadId) cardPage = page;
+  } catch (error) {
+    if (loadId === galleryLoadId) galleryError = "已核验账号列表读取失败，请重新读取。";
+  } finally {
+    if (loadId === galleryLoadId) {
+      galleryLoading = false;
+      renderGallery();
+    }
+  }
+}
+
+async function changeCardPage(page) {
+  await loadGallery(page);
+  document.querySelector("#gallery-heading").scrollIntoView({ block: "start" });
 }
 
 function complete(request, result) {
   clearTimeout(request.timer);
   resumeButton.hidden = true;
+  if (result.status === "excluded") {
+    excludedProfiles.add(result.login.toLowerCase());
+    verifiedProfiles.delete(result.login.toLowerCase());
+    if (currentProfile?.login.toLowerCase() === result.login.toLowerCase()) currentProfile = undefined;
+    renderGallery();
+    showStatus("该账号不符合收录条件", `@${result.login} · 主页返回 HTTP ${result.profilePageStatus}，英灵殿只收录主页返回 404 的账号。`, "unavailable");
+    return;
+  }
   if (result.status === "verified") {
-    renderCard(result);
-    showStatus("已找到资料卡", `@${result.login} · 已核验 Release 原页`, "success");
+    if (result.profilePageStatus !== 404) {
+      refreshButton.hidden = false;
+      showStatus("旧结果需要重新核验", "这条记录尚未确认主页是否返回 404，请点击“重新核验资料”。", "unavailable");
+      return;
+    }
+    excludedProfiles.delete(result.login.toLowerCase());
+    rememberVerified(result, request.issueNumber);
+    // A result is immediately reviewable even while the next Pages snapshot is building.
+    currentProfile = verifiedProfiles.get(result.login.toLowerCase());
+    renderGallery();
+    refreshButton.hidden = false;
+    showStatus("已找到资料卡", `@${result.login} · 已核验 Release 原页，资料卡已加入下方账号列表。`, "success");
   } else if (result.status === "unavailable") {
     showStatus("本次未能在来源页确认资料卡", typeof result.message === "string" && result.message ? result.message : "来源页未返回此用户的可用资料卡；这不代表账号不存在。", "unavailable");
   } else {
@@ -268,7 +432,18 @@ async function poll(request) {
   }
 }
 
-form.addEventListener("submit", (event) => {
+function submitVerification(request) {
+  const issueUrl = new URL(`${repository}/issues/new`);
+  issueUrl.searchParams.set("title", `Verify profile: ${request.login}`);
+  issueUrl.searchParams.set("body", `${requestMarker}\n\nRequest ID: ${request.requestId}\n\nGitHub username: ${request.login}`);
+  submitLink.href = issueUrl.href;
+  submitLink.hidden = false;
+  history.replaceState(null, "", `?${new URLSearchParams({ login: request.login })}`);
+  showStatus("尚未收录，请提交核验请求", `@${request.login} · 点击“打开 GitHub 提交页面”确认一次，返回此页即可等待结果。`);
+  poll(request);
+}
+
+form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const login = normalizedLogin(loginInput.value);
   loginInput.setCustomValidity(login ? "" : "请输入有效的 GitHub 用户名：最多 39 个字母、数字或单个连字符。");
@@ -276,21 +451,44 @@ form.addEventListener("submit", (event) => {
   loginInput.value = login;
   resetRequest();
   const request = makeRequest(login, crypto.randomUUID());
-  const issueUrl = new URL(`${repository}/issues/new`);
-  issueUrl.searchParams.set("title", `Verify profile: ${login}`);
-  issueUrl.searchParams.set("body", `${requestMarker}\n\nRequest ID: ${request.requestId}\n\nGitHub username: ${login}`);
   activeRequest = request;
-  submitLink.href = issueUrl.href;
-  submitLink.hidden = false;
-  history.replaceState(null, "", `?${new URLSearchParams({ login })}`);
-  // Open synchronously during submission; keep a real link if the popup is blocked.
-  const popup = window.open("about:blank", "_blank");
-  if (popup) { popup.opener = null; popup.location.replace(issueUrl.href); }
-  showStatus(popup ? "请在 GitHub 确认提交" : "请打开 GitHub 确认提交", popup ? "提交后回到此页，网页将自动接收结果。" : "浏览器拦截了新窗口，请点击下方“打开 GitHub 提交页面”。");
-  poll(request);
+  showStatus("正在查询已有资料", `@${login} · 优先读取已核验账号，无需重复提交。`);
+  try {
+    await loadProfileIndex();
+    if (!current(request)) return;
+    let profile = verifiedProfiles.get(login.toLowerCase());
+    if (!profile && !excludedProfiles.has(login.toLowerCase())) {
+      const indexed = await readJson(`./profiles/users/${login.toLowerCase()}.json`, request, true);
+      if (indexed) profile = validateIndexedProfile(indexed);
+    }
+    if (!current(request)) return;
+    if (profile) {
+      request.requestId = profile.requestId;
+      request.login = profile.login;
+      issueFound(request, profile.issueNumber);
+      complete(request, profile);
+      showStatus("已找到已核验资料", `@${profile.login} · 资料卡已显示在下方，可按需重新核验。`, "success");
+      return;
+    }
+    submitVerification(request);
+  } catch (error) {
+    if (!current(request)) return;
+    showStatus("暂时无法读取已有资料", "读取失败，请稍后再次查询；本次尚未创建核验请求。", "error");
+  }
 });
 
 loginInput.addEventListener("input", () => loginInput.setCustomValidity(""));
+previousPage.addEventListener("click", () => changeCardPage(cardPage - 1));
+nextPage.addEventListener("click", () => changeCardPage(cardPage + 1));
+pageSelect.addEventListener("change", () => changeCardPage(Number(pageSelect.value)));
+galleryRetry.addEventListener("click", () => loadGallery(requestedCardPage));
+refreshButton.addEventListener("click", () => {
+  const login = activeRequest.login;
+  resetRequest();
+  const request = makeRequest(login, crypto.randomUUID());
+  activeRequest = request;
+  submitVerification(request);
+});
 
 resumeButton.addEventListener("click", () => {
   const request = activeRequest;
@@ -354,4 +552,5 @@ async function initialize() {
   }
 }
 
+loadGallery();
 initialize();

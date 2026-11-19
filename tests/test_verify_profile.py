@@ -1,6 +1,10 @@
+from io import BytesIO
 import json
+import sys
+import types
 import unittest
 from unittest.mock import Mock, patch
+from urllib.error import HTTPError, URLError
 
 from scripts.verify_profile import (
     MENTIONS_END,
@@ -8,6 +12,7 @@ from scripts.verify_profile import (
     RELEASE_URL,
     REPOSITORY,
     REQUEST_MARKER,
+    NoProfileRedirect,
     ProfileRequest,
     VerificationError,
     add_mention,
@@ -15,8 +20,11 @@ from scripts.verify_profile import (
     is_profile_url,
     load_request,
     make_result,
+    observe_profile,
     parse_request,
     previous_result,
+    profile_page_status,
+    read_hovercard,
     result_body,
     run_verification,
     update_release,
@@ -35,7 +43,7 @@ def issue(login="rD227", body=None):
 
 
 def comment(request, author="github-actions[bot]", kind="Bot", status="verified"):
-    result = make_result(request, {"status": status, "message": "Observed publicly."})
+    result = make_result(request, {"status": status, "message": "Observed publicly.", "profilePageStatus": 404})
     return {"id": 100, "user": {"login": author, "type": kind}, "body": result_body(result)}
 
 
@@ -144,9 +152,59 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(client.request.call_count, 1)
 
 
+class ProfilePageTests(unittest.TestCase):
+    def test_checks_original_profile_url_without_authentication_or_redirects(self):
+        response = Mock(status=200)
+        opener = Mock()
+        opener.open.return_value.__enter__ = Mock(return_value=response)
+        opener.open.return_value.__exit__ = Mock(return_value=False)
+        with patch("scripts.verify_profile.build_opener", return_value=opener) as build:
+            self.assertEqual(profile_page_status("rD227"), 200)
+        handler = build.call_args.args[0]
+        self.assertIsInstance(handler, NoProfileRedirect)
+        self.assertIsNone(handler.redirect_request(None, None, None, None, None, None))
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, "https://github.com/rD227")
+        self.assertEqual(request.get_method(), "GET")
+        self.assertFalse(request.has_header("Authorization"))
+        self.assertEqual(opener.open.call_args.kwargs["timeout"], 15)
+
+    def test_returns_explicit_404_and_original_redirect_status(self):
+        for status in (404, 301, 302, 307, 308):
+            body = BytesIO(b"not needed")
+            error = HTTPError("https://github.com/rD227", status, "status", {}, body)
+            with self.subTest(status=status), patch("scripts.verify_profile.build_opener") as build:
+                build.return_value.open.side_effect = error
+                self.assertEqual(profile_page_status("rD227"), status)
+                self.assertTrue(body.closed)
+                build.return_value.open.assert_called_once()
+
+    def test_rate_limits_and_server_failures_do_not_become_visibility_results(self):
+        for status in (403, 429, 500, 502, 503):
+            error = HTTPError("https://github.com/rD227", status, "status", {}, BytesIO())
+            with self.subTest(status=status), patch("scripts.verify_profile.build_opener") as build:
+                build.return_value.open.side_effect = error
+                with self.assertRaisesRegex(VerificationError, "could not be confirmed"):
+                    profile_page_status("rD227")
+
+    def test_network_failure_is_explicit_and_invalid_login_never_requests_url(self):
+        for error in (URLError("unreachable"), TimeoutError("timeout")):
+            with self.subTest(error=error), patch("scripts.verify_profile.build_opener") as build:
+                build.return_value.open.side_effect = error
+                with self.assertRaisesRegex(VerificationError, "visibility is unknown"):
+                    profile_page_status("rD227")
+        with patch("scripts.verify_profile.build_opener") as build:
+            with self.assertRaises(VerificationError):
+                profile_page_status("../not-a-login")
+            build.assert_not_called()
+
+
 class ResultTests(unittest.TestCase):
     def setUp(self):
         self.request = parse_request(issue())
+        status_patch = patch("scripts.verify_profile.profile_page_status", return_value=404)
+        self.page_status = status_patch.start()
+        self.addCleanup(status_patch.stop)
 
     def test_accepts_exact_public_profile_links_only(self):
         self.assertTrue(is_profile_url("/rd227", "rD227"))
@@ -175,6 +233,25 @@ class ResultTests(unittest.TestCase):
         decoded = json.loads(body.split("```json\n", 1)[1].rsplit("\n```", 1)[0])
         self.assertEqual(decoded["bio"], bio)
 
+    def test_hovercard_keeps_newlines_before_result_serialization(self):
+        card = Mock()
+        identity, bio_region, avatar_region, badge_region = Mock(), Mock(), Mock(), Mock()
+        card.get_by_role.side_effect = [identity, bio_region, avatar_region, badge_region]
+        login_link = identity.locator.return_value.first
+        login_link.get_attribute.return_value = "/rD227"
+        login_link.inner_text.return_value = "rD227"
+        bio_region.count.return_value = 1
+        bio_region.inner_text.return_value = "first second third"
+        bio_region.text_content.return_value = "first\nsecond\nthird"
+        avatar_region.locator.return_value.first.get_attribute.return_value = "https://avatars.githubusercontent.com/u/170849438?v=4"
+        observation = read_hovercard(card, "rD227")
+        self.assertEqual(observation["bio"], "first\nsecond\nthird")
+        bio_region.inner_text.assert_not_called()
+        result = make_result(self.request, {"status": "verified", "message": "Observed.", **observation})
+        body = result_body(result)
+        decoded = json.loads(body.split("```json\n", 1)[1].rsplit("\n```", 1)[0])
+        self.assertEqual(decoded["bio"], observation["bio"])
+
     def test_only_accepts_exact_bot_result_and_request_match(self):
         trusted = comment(self.request)
         forged = comment(self.request, author="someone", kind="User")
@@ -194,6 +271,63 @@ class ResultTests(unittest.TestCase):
         update.assert_not_called()
         observe.assert_not_called()
         client.request.assert_called_once_with("PATCH", "/issues/42", {"state": "closed"})
+
+    def test_legacy_success_is_reobserved_to_recover_bio_newlines(self):
+        client = Mock()
+        legacy = comment(self.request)
+        result = make_result(self.request, {"status": "verified", "message": "Old flattened bio."})
+        result.pop("bioFormatVersion")
+        legacy["body"] = result_body(result)
+        client.comments.return_value = [legacy]
+        observation = {"status": "verified", "bio": "first\nsecond", "message": "Reobserved."}
+        with patch("scripts.verify_profile.observe_profile", return_value=observation) as observe:
+            self.assertEqual(run_verification(client, self.request), 0)
+        observe.assert_called_once_with(self.request.login, client)
+        self.assertEqual(client.request.call_args_list[0].args[:2], ("PATCH", "/issues/comments/100"))
+        self.assertIn('"bioFormatVersion": 2', client.request.call_args_list[0].args[2]["body"])
+
+    def test_explicit_refresh_reobserves_current_success(self):
+        client = Mock()
+        client.comments.return_value = [comment(self.request)]
+        with patch("scripts.verify_profile.observe_profile", return_value={"status": "verified", "message": "Refreshed."}) as observe:
+            self.assertEqual(run_verification(client, self.request, refresh=True), 0)
+        observe.assert_called_once_with(self.request.login, client)
+
+    def test_non404_excludes_even_previous_success_and_skips_release_work(self):
+        for status in (200, 301, 302):
+            with self.subTest(status=status):
+                self.page_status.return_value = status
+                client = Mock()
+                client.comments.return_value = [comment(self.request)]
+                with patch("scripts.verify_profile.observe_profile") as observe, patch("scripts.verify_profile.update_release") as update:
+                    self.assertEqual(run_verification(client, self.request), 0)
+                observe.assert_not_called()
+                update.assert_not_called()
+                decoded = json.loads(client.request.call_args_list[0].args[2]["body"].split("```json\n", 1)[1].rsplit("\n```", 1)[0])
+                self.assertEqual(decoded["status"], "excluded")
+                self.assertEqual(decoded["profilePageStatus"], status)
+
+    def test_verified_result_records_explicit_404_and_rechecks_old_evidence(self):
+        client = Mock()
+        legacy = comment(self.request)
+        old = make_result(self.request, {"status": "verified", "message": "Old result."})
+        old.pop("profilePageStatus")
+        legacy["body"] = result_body(old)
+        client.comments.return_value = [legacy]
+        with patch("scripts.verify_profile.observe_profile", return_value={"status": "verified", "message": "Observed."}) as observe:
+            self.assertEqual(run_verification(client, self.request), 0)
+        observe.assert_called_once_with(self.request.login, client)
+        self.page_status.assert_called_once_with(self.request.login)
+        self.assertIn('"profilePageStatus": 404', client.request.call_args_list[0].args[2]["body"])
+
+    def test_unknown_page_status_fails_job_without_reusing_cached_success(self):
+        self.page_status.side_effect = VerificationError("The profile page could not be checked.")
+        client = Mock()
+        client.comments.return_value = [comment(self.request)]
+        with patch("scripts.verify_profile.observe_profile") as observe, patch("scripts.verify_profile.traceback.print_exception"):
+            self.assertEqual(run_verification(client, self.request), 1)
+        observe.assert_not_called()
+        self.assertIn('"status": "error"', client.request.call_args_list[0].args[2]["body"])
 
     def test_error_posts_explicit_result_closes_request_and_fails_job(self):
         client = Mock()
@@ -219,6 +353,48 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(result["requestId"], REQUEST_ID)
         self.assertEqual(result["login"], "rD227")
         self.assertEqual(result["status"], "verified")
+
+
+class ObserveTests(unittest.TestCase):
+    def browser(self, hrefs):
+        page = Mock()
+        page.url = RELEASE_URL
+        page.goto.return_value.status = 200
+        links = page.locator.return_value.filter.return_value.locator.return_value
+        links.count.return_value = len(hrefs)
+        entries = []
+        for href in hrefs:
+            link = Mock()
+            link.get_attribute.return_value = href
+            entries.append(link)
+        links.nth.side_effect = entries
+        playwright = Mock()
+        playwright.chromium.launch.return_value.new_page.return_value = page
+        manager = Mock()
+        manager.__enter__ = Mock(return_value=playwright)
+        manager.__exit__ = Mock(return_value=False)
+        module = types.ModuleType("playwright.sync_api")
+        module.TimeoutError = TimeoutError
+        module.sync_playwright = Mock(return_value=manager)
+        return page, module
+
+    def test_existing_contributor_is_read_before_any_release_edit(self):
+        page, module = self.browser(["/rD227"])
+        with patch.dict(sys.modules, {"playwright.sync_api": module}), patch("scripts.verify_profile.update_release") as update, patch("scripts.verify_profile.read_hovercard", return_value={"bio": "first\nsecond"}):
+            result = observe_profile("rD227", Mock())
+        self.assertEqual(result["status"], "verified")
+        update.assert_not_called()
+        page.goto.assert_called_once()
+
+    def test_missing_contributor_edits_once_after_initial_read(self):
+        page, module = self.browser([])
+        order = []
+        page.goto.side_effect = lambda *args, **kwargs: order.append("read") or Mock(status=200)
+        with patch.dict(sys.modules, {"playwright.sync_api": module}), patch("scripts.verify_profile.update_release", side_effect=lambda *args: order.append("edit")) as update:
+            result = observe_profile("missing-user", Mock())
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(order[:2], ["read", "edit"])
+        self.assertEqual(update.call_count, 1)
 
 
 if __name__ == "__main__":

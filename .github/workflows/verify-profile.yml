@@ -9,6 +9,11 @@ on:
         description: Existing profile request issue number to verify again
         required: true
         type: string
+      refresh:
+        description: Refresh the existing result, including biography line breaks
+        required: false
+        default: false
+        type: boolean
 
 permissions: {}
 
@@ -60,8 +65,14 @@ jobs:
         run: |
           python -m pip install playwright==1.65.2
           python -m playwright install --with-deps chromium
-      - name: Update release, hover public contributor, and publish result
+      - name: Check existing contributor, add only when missing, and publish result
         if: ${{ !cancelled() }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/verify_profile.py
+          PROFILE_REFRESH: ${{ inputs.refresh }}
+        run: |
+          if [ "$PROFILE_REFRESH" = "true" ]; then
+            python scripts/verify_profile.py --refresh
+          else
+            python scripts/verify_profile.py
+          fi
