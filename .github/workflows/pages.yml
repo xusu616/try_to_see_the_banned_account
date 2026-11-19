@@ -33,6 +33,8 @@ jobs:
           python-version: '3.13'
       - name: Test card builder
         run: python -m unittest discover -s tests
+      - name: Test query and pagination logic
+        run: node --test tests/test_site_app.cjs
       - name: Build static site
         run: python scripts/build_pages.py --output "$RUNNER_TEMP/profile-cards"
       - name: Restore verified-profile database

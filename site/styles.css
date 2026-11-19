@@ -36,7 +36,7 @@ a:hover { color: var(--accent-dark); }
 form label { display: block; margin-bottom: .35rem; font-size: .86rem; font-weight: 650; }
 .input-row { display: flex; align-items: stretch; gap: .65rem; }
 .input-wrap { display: flex; align-items: center; min-width: 0; flex: 1; border: 1px solid #9eafa4; border-radius: .5rem; background: var(--surface); }
-.input-wrap > span { padding-left: .85rem; color: var(--muted); font-size: 1.15rem; }
+.input-wrap > span { padding-left: 1.1rem; color: var(--muted); font-size: 1.15rem; }
 input { min-width: 0; width: 100%; padding: .75rem .65rem; border: 0; border-radius: .5rem; background: transparent; color: var(--ink); font: 1rem/1.5 var(--sans); }
 input::placeholder { color: #65786d; }
 button { display: inline-flex; align-items: center; justify-content: center; gap: .5rem; padding: .65rem 1.1rem; border: 1px solid var(--accent); border-radius: .5rem; background: var(--accent); color: #fff; font: 700 .92rem/1.5 var(--sans); cursor: pointer; white-space: nowrap; }

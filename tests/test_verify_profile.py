@@ -33,6 +33,7 @@ from scripts.verify_profile import (
     result_body,
     run_verification,
     update_release,
+    valid_request_id,
 )
 
 
@@ -60,10 +61,50 @@ def release(tag="v0.1.1", logins=()):
             "html_url": f"https://github.com/{REPOSITORY}/releases/tag/{tag}", "body": body}
 
 
+class MemoryReleaseClient:
+    def __init__(self, releases):
+        self.releases = {item["tag_name"]: dict(item) for item in releases}
+        self.request = Mock(side_effect=self.respond)
+
+    def respond(self, method, path, payload=None, allow_missing=False):
+        if method == "GET" and path.startswith("/releases?"):
+            return [dict(item) for item in self.releases.values()]
+        if method == "GET" and path.startswith("/releases/tags/"):
+            return dict(self.releases[path.rsplit("/", 1)[1]])
+        if method == "GET" and path.startswith("/git/ref/tags/"):
+            return None
+        if method == "POST" and path == "/releases":
+            created = {**payload, "id": max(item["id"] for item in self.releases.values()) + 1,
+                       "html_url": f"https://github.com/{REPOSITORY}/releases/tag/{payload['tag_name']}"}
+            self.releases[created["tag_name"]] = created
+            return dict(created)
+        if method == "PATCH" and path.startswith("/releases/"):
+            current = next(item for item in self.releases.values() if item["id"] == int(path.rsplit("/", 1)[1]))
+            current.update(payload)
+            return dict(current)
+        raise AssertionError((method, path))
+
+
 class RequestTests(unittest.TestCase):
     def test_accepts_normal_ascii_login_and_canonical_uuid(self):
         request = parse_request(issue("some-user"))
         self.assertEqual(request, ProfileRequest(42, REQUEST_ID, "some-user"))
+
+    def test_uppercase_v4_id_is_normalized_and_other_versions_or_variants_are_rejected(self):
+        body = f"{REQUEST_MARKER}\nRequest ID: {REQUEST_ID.upper()}\n"
+        self.assertEqual(parse_request(issue(body=body)).request_id, REQUEST_ID)
+        self.assertTrue(valid_request_id(REQUEST_ID.upper()))
+        for value in (
+            "95b7e76a-df4b-1d91-b507-bcf5bed45e44",
+            "95b7e76a-df4b-5d91-b507-bcf5bed45e44",
+            "95b7e76a-df4b-4d91-7507-bcf5bed45e44",
+            "95b7e76a-df4b-4d91-c507-bcf5bed45e44",
+            "00000000-0000-0000-0000-000000000000",
+        ):
+            with self.subTest(value=value):
+                self.assertFalse(valid_request_id(value))
+                with self.assertRaisesRegex(VerificationError, "UUID v4"):
+                    parse_request(issue(body=f"{REQUEST_MARKER}\nRequest ID: {value}\n"))
 
     def test_rejects_injection_and_invalid_github_logins(self):
         for login in (
@@ -127,19 +168,21 @@ class ReleaseTests(unittest.TestCase):
 
     def test_create_increments_patch_and_keeps_cli_latest_unchanged(self):
         client = Mock()
-        client.request.side_effect = [None, release("v0.1.2", ["seventh"])]
-        created = create_profile_release(client, "seventh", {1})
+        client.request.side_effect = [None, release("v0.1.2")]
+        created = create_profile_release(client, {1})
         self.assertEqual(created["tag_name"], "v0.1.2")
         method, path, payload = client.request.call_args.args
         self.assertEqual((method, path), ("POST", "/releases"))
         self.assertEqual(payload["tag_name"], "v0.1.2")
         self.assertEqual(payload["make_latest"], "false")
-        self.assertIn("@seventh", payload["body"])
+        self.assertIn(BATCH_MARKER, payload["body"])
+        self.assertEqual(release_members(created), set())
+        self.assertNotIn(MENTIONS_START, payload["body"])
 
     def test_create_skips_existing_tag_without_overwriting_it(self):
         client = Mock()
-        client.request.side_effect = [{"ref": "refs/tags/v0.1.2"}, None, release("v0.1.3", ["seventh"])]
-        self.assertEqual(create_profile_release(client, "seventh", {1})["tag_name"], "v0.1.3")
+        client.request.side_effect = [{"ref": "refs/tags/v0.1.2"}, None, release("v0.1.3")]
+        self.assertEqual(create_profile_release(client, {1})["tag_name"], "v0.1.3")
 
     def test_source_url_accepts_managed_version_series_only(self):
         self.assertTrue(is_release_url(release("v0.1.10")["html_url"]))
@@ -463,10 +506,11 @@ class ObserveTests(unittest.TestCase):
             page.url = url
             return Mock(status=200)
         page.goto.side_effect = navigate
-        with patch.dict(sys.modules, {"playwright.sync_api": module}), patch("scripts.verify_profile.create_profile_release", return_value=created) as create, patch("scripts.verify_profile.update_release") as update:
-            result = observe_profile("seventh", Mock())
+        client = Mock()
+        with patch.dict(sys.modules, {"playwright.sync_api": module}), patch("scripts.verify_profile.create_profile_release", return_value=created) as create, patch("scripts.verify_profile.update_release", return_value=False) as update:
+            result = observe_profile("seventh", client)
         create.assert_called_once()
-        update.assert_not_called()
+        update.assert_called_once_with(client, "seventh", "v0.1.2")
         self.assertEqual(result["releaseUrl"], created["html_url"])
         self.assertEqual(page.goto.call_args.args[0], created["html_url"])
 
@@ -485,7 +529,7 @@ class ObserveTests(unittest.TestCase):
     def test_sixth_account_uses_current_release_without_creating_another(self):
         self.catalog.return_value = ([release(logins=[f"user{i}" for i in range(5)])], {1})
         page, module = self.browser([])
-        with patch.dict(sys.modules, {"playwright.sync_api": module}), patch("scripts.verify_profile.create_profile_release") as create, patch("scripts.verify_profile.update_release") as update:
+        with patch.dict(sys.modules, {"playwright.sync_api": module}), patch("scripts.verify_profile.create_profile_release") as create, patch("scripts.verify_profile.update_release", return_value=False) as update:
             result = observe_profile("sixth", Mock())
         create.assert_not_called()
         self.assertEqual(update.call_args.args[1:3], ("sixth", "v0.1.1"))
@@ -498,11 +542,153 @@ class ObserveTests(unittest.TestCase):
             page.url = url
             return Mock(status=200)
         page.goto.side_effect = navigate
-        with patch.dict(sys.modules, {"playwright.sync_api": module}), patch("scripts.verify_profile.create_profile_release", return_value=created) as create, patch("scripts.verify_profile.update_release") as update:
-            result = observe_profile("seventh", Mock())
+        client = Mock()
+        with patch.dict(sys.modules, {"playwright.sync_api": module}), patch("scripts.verify_profile.create_profile_release", return_value=created) as create, patch("scripts.verify_profile.update_release", return_value=False) as update:
+            result = observe_profile("seventh", client)
         create.assert_called_once()
-        update.assert_not_called()
+        update.assert_called_once_with(client, "seventh", "v0.1.2")
         self.assertEqual(result["releaseUrl"], created["html_url"])
+
+    def test_seven_failed_queries_do_not_fill_slots_or_create_another_release(self):
+        self.catalog.side_effect = release_catalog
+        client = MemoryReleaseClient([release()])
+        page, module = self.browser([])
+        with patch.dict(sys.modules, {"playwright.sync_api": module}):
+            results = [observe_profile(f"missing-user{i}", client) for i in range(7)]
+        self.assertTrue(all(result["status"] == "unavailable" for result in results))
+        self.assertEqual(list(client.releases), ["v0.1.1"])
+        self.assertEqual(release_members(client.releases["v0.1.1"]), set())
+
+    def test_six_successful_queries_keep_slots_and_seventh_gets_new_release(self):
+        self.catalog.side_effect = release_catalog
+        client = MemoryReleaseClient([release()])
+        page, module = self.browser([])
+        links = page.locator.return_value.filter.return_value.locator.return_value
+        current_login = ""
+
+        def navigate(url, **kwargs):
+            page.url = url
+            members = release_members(client.releases[url.rsplit("/", 1)[1]])
+            links.count.return_value = int(current_login in members)
+            link = Mock()
+            link.get_attribute.return_value = f"/{current_login}"
+            links.nth.side_effect = lambda index: link
+            return Mock(status=200)
+
+        page.goto.side_effect = navigate
+        results = []
+        with patch.dict(sys.modules, {"playwright.sync_api": module}), patch("scripts.verify_profile.read_hovercard", return_value={"bio": "Available"}):
+            for index in range(7):
+                current_login = f"user{index}"
+                results.append(observe_profile(current_login, client))
+        self.assertTrue(all(result["status"] == "verified" for result in results))
+        self.assertEqual(release_members(client.releases["v0.1.1"]), {f"user{i}" for i in range(6)})
+        self.assertEqual(release_members(client.releases["v0.1.2"]), {"user6"})
+        self.assertEqual(results[-1]["releaseUrl"], client.releases["v0.1.2"]["html_url"])
+
+    def test_cleanup_preserves_existing_members_notes_and_later_manual_edit(self):
+        self.catalog.side_effect = release_catalog
+        original = release(logins=["existing-member"])
+        original["body"] = "Original notes, thanks to @credited-user.\n\n" + original["body"]
+        client = MemoryReleaseClient([original])
+        page, module = self.browser([])
+        manual_edit = "\nA later manual edit credits @another-user."
+        patched = False
+
+        def respond(method, path, payload=None, **kwargs):
+            nonlocal patched
+            result = client.respond(method, path, payload, **kwargs)
+            if method == "PATCH" and not patched:
+                patched = True
+                client.releases["v0.1.1"]["body"] += manual_edit
+            return result
+
+        client.request.side_effect = respond
+        with patch.dict(sys.modules, {"playwright.sync_api": module}):
+            self.assertEqual(observe_profile("missing-user", client)["status"], "unavailable")
+        self.assertEqual(client.releases["v0.1.1"]["body"], original["body"] + manual_edit)
+
+    def test_failed_new_batch_is_empty_and_reused_by_the_next_query(self):
+        self.catalog.side_effect = release_catalog
+        original = release(logins=[f"user{i}" for i in range(6)])
+        client = MemoryReleaseClient([original])
+        page, module = self.browser([])
+
+        def navigate(url, **kwargs):
+            page.url = url
+            return Mock(status=200)
+
+        page.goto.side_effect = navigate
+        with patch.dict(sys.modules, {"playwright.sync_api": module}):
+            for login in ("missing-one", "missing-two"):
+                result = observe_profile(login, client)
+                self.assertEqual(result["status"], "unavailable")
+                self.assertTrue(result["releaseUrl"].endswith("/v0.1.2"))
+        self.assertEqual(list(client.releases), ["v0.1.1", "v0.1.2"])
+        self.assertEqual(client.releases["v0.1.1"]["body"], original["body"])
+        self.assertEqual(release_members(client.releases["v0.1.2"]), set())
+
+    def test_existing_member_survives_a_temporary_hovercard_timeout(self):
+        original = release(logins=["existing-user"])
+        self.catalog.return_value = ([original], {1})
+        client = MemoryReleaseClient([original])
+        page, module = self.browser(["/existing-user"])
+        page.get_by_role.return_value.wait_for.side_effect = TimeoutError("Hovercard timed out")
+        with patch.dict(sys.modules, {"playwright.sync_api": module}):
+            self.assertEqual(observe_profile("existing-user", client)["status"], "unavailable")
+        self.assertEqual(client.releases["v0.1.1"]["body"], original["body"])
+        client.request.assert_not_called()
+
+    def test_browser_failure_after_reservation_cleans_up_and_preserves_the_error(self):
+        self.catalog.side_effect = release_catalog
+        client = MemoryReleaseClient([release()])
+        page, module = self.browser([])
+        error = TimeoutError("Release navigation timed out")
+        page.goto.side_effect = [Mock(status=200), error]
+        with patch.dict(sys.modules, {"playwright.sync_api": module}), self.assertRaises(TimeoutError) as caught:
+            observe_profile("missing-user", client)
+        self.assertIs(caught.exception, error)
+        self.assertEqual(release_members(client.releases["v0.1.1"]), set())
+
+    def test_patch_applied_before_response_timeout_is_also_cleaned_up(self):
+        client = MemoryReleaseClient([release()])
+        error = TimeoutError("PATCH response timed out")
+        patched = False
+
+        def respond(method, path, payload=None, **kwargs):
+            nonlocal patched
+            result = client.respond(method, path, payload, **kwargs)
+            if method == "PATCH" and not patched:
+                patched = True
+                raise error
+            return result
+
+        client.request.side_effect = respond
+        with self.assertRaises(TimeoutError) as caught:
+            update_release(client, "missing-user")
+        self.assertIs(caught.exception, error)
+        self.assertEqual(release_members(client.releases["v0.1.1"]), set())
+
+    def test_operation_and_cleanup_failures_are_both_reported(self):
+        client = MemoryReleaseClient([release()])
+        operation_error = TimeoutError("PATCH response timed out")
+        cleanup_error = VerificationError("Cleanup read could not reach GitHub.")
+        patched = False
+
+        def respond(method, path, payload=None, **kwargs):
+            nonlocal patched
+            if patched:
+                raise cleanup_error
+            result = client.respond(method, path, payload, **kwargs)
+            if method == "PATCH":
+                patched = True
+                raise operation_error
+            return result
+
+        client.request.side_effect = respond
+        with self.assertRaises(ExceptionGroup) as caught:
+            update_release(client, "missing-user")
+        self.assertEqual(caught.exception.exceptions, (operation_error, cleanup_error))
 
 
 if __name__ == "__main__":

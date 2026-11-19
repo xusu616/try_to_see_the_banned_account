@@ -8,11 +8,13 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import sys
 from urllib.parse import parse_qsl, urlsplit
+from uuid import uuid4
 
 from scripts.verify_profile import (
     API_ROOT, RESULT_JSON, GitHubClient, VerificationError,
-    is_avatar_url, is_release_url, parse_request, profile_page_status,
+    is_avatar_url, is_release_url, parse_request, profile_page_status, valid_request_id,
 )
 
 
@@ -33,6 +35,19 @@ def open_index(path):
     connection.execute("CREATE INDEX IF NOT EXISTS profile_date ON profiles(observed_at DESC, login)")
     connection.execute("CREATE INDEX IF NOT EXISTS profile_bio_format ON profiles(bio_format_version)")
     connection.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    version = connection.execute("SELECT value FROM metadata WHERE key = 'request_id_format'").fetchone()
+    if version != ("uuid-v4",):
+        # Older workers accepted UUIDs that the frontend could not read. Upgrade
+        # the cached database once without discarding its incremental-sync cursor.
+        with connection:
+            invalid = [
+                login for login, encoded in connection.execute("SELECT login, result FROM profiles")
+                if not valid_request_id(json.loads(encoded).get("requestId"))
+            ]
+            for login in invalid:
+                connection.execute("DELETE FROM profiles WHERE login = ?", (login,))
+                print(f"Removed cached profile @{login}: its request ID is not UUID v4.", file=sys.stderr)
+            connection.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES ('request_id_format', 'uuid-v4')")
     return connection
 
 
@@ -54,6 +69,7 @@ def decoded_result(comment):
 def validate_result(result, request):
     if (
         result.get("status") != "verified"
+        or not valid_request_id(result.get("requestId"))
         or result.get("requestId") != request.request_id
         or not isinstance(result.get("login"), str)
         or result["login"].casefold() != request.login.casefold()
@@ -117,8 +133,23 @@ def sync_index(connection, client, now=None):
                     raise VerificationError("A result comment does not belong to the fixed repository.")
                 number = int(match[1])
                 if number not in requests:
-                    requests[number] = parse_request(client.request("GET", f"/issues/{number}"))
+                    issue = client.request("GET", f"/issues/{number}")
+                    try:
+                        requests[number] = parse_request(issue)
+                    except VerificationError as error:
+                        # Issue authors can edit requests after a result is posted.
+                        # Invalid mutable input must not block unrelated results.
+                        requests[number] = None
+                        print(f"Skipping results for issue #{number}: {error}", file=sys.stderr)
                 request = requests[number]
+                if request is None:
+                    continue
+                if (
+                    result.get("requestId") != request.request_id
+                    or isinstance(result.get("login"), str) and result["login"].casefold() != request.login.casefold()
+                ):
+                    print(f"Skipping result for issue #{number}: the current request no longer matches this result.", file=sys.stderr)
+                    continue
                 if result.get("status") == "excluded":
                     # Exclusion events remove accounts that have become visible again.
                     if (
@@ -150,6 +181,7 @@ def sync_index(connection, client, now=None):
 
 
 def export_index(connection, output):
+    snapshot_id = str(uuid4())
     count = connection.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
     snapshot = output / "profiles"
     page_directory = snapshot / "pages"
@@ -165,7 +197,7 @@ def export_index(connection, output):
     page = []
     page_number = 1
     for login, encoded in connection.execute("SELECT login, result FROM profiles ORDER BY observed_at DESC, login"):
-        result = json.loads(encoded)
+        result = {**json.loads(encoded), "snapshotId": snapshot_id}
         login_path = login_directory / f"{login.casefold()}.json"
         write(login_path, result)
         stale_logins.discard(login_path)
@@ -182,7 +214,10 @@ def export_index(connection, output):
         stale_pages.discard(page_path)
     for path in stale_pages | stale_logins:
         path.unlink()
-    write(snapshot / "index.json", {"total": count, "pageSize": PAGE_SIZE, "pageCount": max(1, (count + PAGE_SIZE - 1) // PAGE_SIZE)})
+    write(snapshot / "index.json", {
+        "snapshotId": snapshot_id, "total": count, "pageSize": PAGE_SIZE,
+        "pageCount": max(1, (count + PAGE_SIZE - 1) // PAGE_SIZE),
+    })
     return count
 
 

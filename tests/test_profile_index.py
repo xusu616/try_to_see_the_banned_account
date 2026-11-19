@@ -1,5 +1,6 @@
 from contextlib import closing
 from datetime import datetime, timezone
+from io import StringIO
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,7 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from scripts.profile_index import export_index, open_index, refresh_bios, store_result, sync_index
-from scripts.verify_profile import API_ROOT, RELEASE_URL, REQUEST_MARKER, ProfileRequest, VerificationError, make_result, result_body
+from scripts.verify_profile import API_ROOT, RELEASE_URL, REQUEST_MARKER, ProfileRequest, VerificationError, make_result, result_body, valid_request_id
 
 
 REQUEST_ID = "95b7e76a-df4b-4d91-b507-bcf5bed45e44"
@@ -23,12 +24,12 @@ def result(login="rD227", observed_at="2026-11-19T01:00:00Z"):
     return profile
 
 
-def issue():
-    return {"number": 42, "title": "Verify profile: rD227", "body": f"{REQUEST_MARKER}\nRequest ID: {REQUEST_ID}\n"}
+def issue(login="rD227", number=42):
+    return {"number": number, "title": f"Verify profile: {login}", "body": f"{REQUEST_MARKER}\nRequest ID: {REQUEST_ID}\nGitHub username: {login}\n"}
 
 
-def comment(profile=None):
-    return {"user": {"login": "github-actions[bot]", "type": "Bot"}, "issue_url": f"{API_ROOT}/issues/42", "body": result_body(profile or result())}
+def comment(profile=None, number=42):
+    return {"user": {"login": "github-actions[bot]", "type": "Bot"}, "issue_url": f"{API_ROOT}/issues/{number}", "body": result_body(profile or result())}
 
 
 class IndexTests(unittest.TestCase):
@@ -67,11 +68,34 @@ class IndexTests(unittest.TestCase):
                 store_result(connection, result(login, f"2026-11-19T01:{index:02}:00Z"), request(login, index + 1))
             self.assertEqual(export_index(connection, Path(directory)), 13)
             root = Path(directory) / "profiles"
-            self.assertEqual(json.loads((root / "index.json").read_text()), {"total": 13, "pageSize": 6, "pageCount": 3})
+            index = json.loads((root / "index.json").read_text())
+            self.assertTrue(valid_request_id(index["snapshotId"]))
+            self.assertEqual(index, {"snapshotId": index["snapshotId"], "total": 13, "pageSize": 6, "pageCount": 3})
             self.assertEqual([len(json.loads((root / "pages" / f"{page}.json").read_text())) for page in (1, 2, 3)], [6, 6, 1])
             profile = json.loads((root / "users" / "user12.json").read_text())
             self.assertEqual(profile["bio"], "first\nsecond")
             self.assertEqual(profile["issueNumber"], 13)
+
+    def test_each_export_labels_all_files_with_one_new_snapshot_id(self):
+        with closing(open_index(":memory:")) as connection, TemporaryDirectory() as directory:
+            for index in range(7):
+                store_result(connection, result(f"user{index}"), request(f"user{index}", index + 1))
+            records_before = connection.execute("SELECT result FROM profiles ORDER BY login").fetchall()
+            root = Path(directory) / "profiles"
+            snapshot_ids = []
+            for _ in range(2):
+                export_index(connection, Path(directory))
+                snapshot_id = json.loads((root / "index.json").read_text())["snapshotId"]
+                self.assertTrue(valid_request_id(snapshot_id))
+                snapshot_ids.append(snapshot_id)
+                users = [json.loads(path.read_text()) for path in (root / "users").glob("*.json")]
+                pages = [json.loads(path.read_text()) for path in (root / "pages").glob("*.json")]
+                self.assertEqual(len(users), 7)
+                self.assertEqual(len(pages), 2)
+                self.assertEqual({profile["snapshotId"] for profile in users}, {snapshot_id})
+                self.assertEqual({profile["snapshotId"] for page in pages for profile in page}, {snapshot_id})
+            self.assertNotEqual(snapshot_ids[0], snapshot_ids[1])
+            self.assertEqual(connection.execute("SELECT result FROM profiles ORDER BY login").fetchall(), records_before)
 
     def test_sync_reads_only_new_comments_and_checks_each_request_once(self):
         with closing(open_index(":memory:")) as connection:
@@ -90,11 +114,112 @@ class IndexTests(unittest.TestCase):
     def test_sync_failure_rolls_back_cursor_and_partial_rows(self):
         with closing(open_index(":memory:")) as connection:
             client = Mock()
-            client.request.side_effect = [[comment(), comment({**result(), "login": "wrong"})], issue()]
+            client.request.side_effect = [[comment(), comment({**result(), "badge": "invalid"})], issue()]
             with self.assertRaises(VerificationError):
                 sync_index(connection, client)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM profiles").fetchone()[0], 0)
             self.assertIsNone(connection.execute("SELECT value FROM metadata WHERE key = 'last_sync'").fetchone())
+
+    def test_sync_skips_edited_requests_without_blocking_valid_results(self):
+        original = issue()
+        changes = (
+            {"title": "Done, thank you"},
+            {"body": "The original request was removed."},
+            {"body": original["body"].replace(REQUEST_ID, "851565cc-2fca-48c2-a0af-91f33f49ecdb")},
+            {"body": original["body"].replace(REQUEST_ID, "12345678-1234-1234-1234-123456789abc")},
+            {"title": "Verify profile: renamed-user"},
+        )
+        for change in changes:
+            with self.subTest(change=change), closing(open_index(":memory:")) as connection:
+                self.page_status.reset_mock()
+                with connection:
+                    store_result(connection, result(), request())
+                    connection.execute("INSERT INTO metadata VALUES ('last_sync', '2026-11-19T01:00:00Z')")
+                previous = connection.execute("SELECT result FROM profiles WHERE login = 'rD227'").fetchone()[0]
+                client = Mock()
+                client.request.side_effect = [
+                    [comment(), comment(), comment(result("valid-user"), 43)],
+                    {**original, **change}, issue("valid-user", 43),
+                ]
+                with patch("sys.stderr", new_callable=StringIO) as diagnostics:
+                    sync_index(connection, client, datetime(2026, 11, 19, 2, tzinfo=timezone.utc))
+                self.assertIn("issue #42", diagnostics.getvalue())
+                self.assertEqual(client.request.call_count, 3)
+                self.page_status.assert_called_once_with("valid-user")
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM profiles").fetchone()[0], 2)
+                self.assertEqual(connection.execute("SELECT result FROM profiles WHERE login = 'rD227'").fetchone()[0], previous)
+                self.assertEqual(connection.execute("SELECT value FROM metadata WHERE key = 'last_sync'").fetchone()[0], "2026-11-19T01:59:59Z")
+
+    def test_sync_skips_exclusion_for_a_changed_request_id(self):
+        with closing(open_index(":memory:")) as connection:
+            with connection:
+                store_result(connection, result(), request())
+            changed = issue()
+            changed["body"] = changed["body"].replace(REQUEST_ID, "851565cc-2fca-48c2-a0af-91f33f49ecdb")
+            excluded = {**result(), "status": "excluded", "profilePageStatus": 200}
+            client = Mock()
+            client.request.side_effect = [[comment(excluded)], changed]
+            with patch("sys.stderr", new_callable=StringIO) as diagnostics:
+                sync_index(connection, client)
+            self.assertIn("no longer matches", diagnostics.getvalue())
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM profiles").fetchone()[0], 1)
+            self.assertIsNotNone(connection.execute("SELECT value FROM metadata WHERE key = 'last_sync'").fetchone())
+            self.page_status.assert_not_called()
+
+    def test_issue_network_failure_still_rolls_back_partial_sync(self):
+        with closing(open_index(":memory:")) as connection:
+            client = Mock()
+            client.request.side_effect = [
+                [comment(), comment(result("valid-user"), 43)],
+                issue(), VerificationError("GitHub REST API could not be reached."),
+            ]
+            with self.assertRaisesRegex(VerificationError, "could not be reached"):
+                sync_index(connection, client)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM profiles").fetchone()[0], 0)
+            self.assertIsNone(connection.execute("SELECT value FROM metadata WHERE key = 'last_sync'").fetchone())
+
+    def test_cached_non_v4_ids_are_removed_once_without_resetting_sync_cursor(self):
+        with TemporaryDirectory() as directory:
+            database = Path(directory) / "profiles.sqlite"
+            with closing(open_index(database)) as connection, connection:
+                store_result(connection, result(), request())
+                legacy = {**result("legacy-user"), "requestId": "12345678-1234-1234-1234-123456789abc", "issueNumber": 43}
+                connection.execute("INSERT INTO profiles VALUES (?, ?, ?, ?, ?)",
+                                   ("legacy-user", legacy["observedAt"], 43, 2, json.dumps(legacy)))
+                uppercase = {**result("uppercase-user"), "requestId": REQUEST_ID.upper(), "issueNumber": 44}
+                connection.execute("INSERT INTO profiles VALUES (?, ?, ?, ?, ?)",
+                                   ("uppercase-user", uppercase["observedAt"], 44, 2, json.dumps(uppercase)))
+                connection.execute("INSERT INTO metadata VALUES ('last_sync', '2026-11-19T01:00:00Z')")
+                connection.execute("DELETE FROM metadata WHERE key = 'request_id_format'")
+            with patch("scripts.profile_index.valid_request_id", wraps=valid_request_id) as validate_id:
+                with patch("sys.stderr", new_callable=StringIO) as diagnostics, closing(open_index(database)) as connection:
+                    self.assertIn("@legacy-user", diagnostics.getvalue())
+                    self.assertEqual(validate_id.call_count, 3)
+                    self.assertEqual(connection.execute("SELECT value FROM metadata WHERE key = 'last_sync'").fetchone()[0], "2026-11-19T01:00:00Z")
+                    self.assertEqual(export_index(connection, Path(directory)), 2)
+                    profiles = json.loads((Path(directory) / "profiles/pages/1.json").read_text())
+                    self.assertEqual({profile["login"] for profile in profiles}, {"rD227", "uppercase-user"})
+                with closing(open_index(database)) as connection:
+                    self.assertEqual(validate_id.call_count, 3)
+                    self.assertEqual(connection.execute("SELECT value FROM metadata WHERE key = 'request_id_format'").fetchone()[0], "uuid-v4")
+
+    def test_request_id_migration_does_not_hide_corrupted_database_records(self):
+        with closing(open_index(":memory:")) as connection:
+            with connection:
+                connection.execute("INSERT INTO profiles VALUES ('broken', '2026-11-19T01:00:00Z', 42, 2, 'invalid json')")
+                connection.execute("DELETE FROM metadata WHERE key = 'request_id_format'")
+            with patch("scripts.profile_index.sqlite3.connect", return_value=connection):
+                with self.assertRaises(json.JSONDecodeError):
+                    open_index(":memory:")
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM profiles").fetchone()[0], 1)
+            self.assertIsNone(connection.execute("SELECT value FROM metadata WHERE key = 'request_id_format'").fetchone())
+
+    def test_store_result_rejects_non_v4_ids_even_when_request_matches(self):
+        with closing(open_index(":memory:")) as connection:
+            identifier = "12345678-1234-1234-1234-123456789abc"
+            with self.assertRaises(VerificationError):
+                store_result(connection, {**result(), "requestId": identifier}, ProfileRequest(42, identifier, "rD227"))
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM profiles").fetchone()[0], 0)
 
     def test_old_bio_migration_reads_existing_contributor_without_editing_release(self):
         with closing(open_index(":memory:")) as connection:

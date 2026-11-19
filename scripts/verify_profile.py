@@ -48,6 +48,13 @@ def valid_login(login):
     return isinstance(login, str) and 1 <= len(login) <= 39 and USERNAME.fullmatch(login) is not None
 
 
+def valid_request_id(value):
+    return isinstance(value, str) and re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+        value, re.IGNORECASE | re.ASCII,
+    ) is not None
+
+
 class NoProfileRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
@@ -92,6 +99,8 @@ def parse_request(issue):
     identifiers = REQUEST_ID.findall(body)
     if len(identifiers) != 1 or len(re.findall(r"^Request ID:", body, re.MULTILINE)) != 1:
         raise VerificationError("The request must contain exactly one canonical UUID.")
+    if not valid_request_id(identifiers[0]):
+        raise VerificationError("The request ID must be a UUID v4 with the standard variant.")
     request_id = str(UUID(identifiers[0]))
     return ProfileRequest(number, request_id, login)
 
@@ -223,7 +232,7 @@ def release_catalog(client):
     return releases, occupied
 
 
-def create_profile_release(client, login, occupied):
+def create_profile_release(client, occupied):
     patch_number = max(occupied) + 1
     # A version may already name a tag without a Release; leave that tag alone.
     while client.request("GET", f"/git/ref/tags/v0.1.{patch_number}", allow_missing=True) is not None:
@@ -231,7 +240,9 @@ def create_profile_release(client, login, occupied):
     tag = f"v0.1.{patch_number}"
     release = client.request("POST", "/releases", {
         "tag_name": tag, "target_commitish": "main", "name": f"英灵殿资料卡 · {tag}",
-        "body": add_mention(f"{BATCH_MARKER}\n\n公开资料卡来源，每批最多 6 个账号。", login),
+        # Reserve the login separately, so an ambiguous creation response can only
+        # leave an empty, reusable batch rather than an untracked account slot.
+        "body": f"{BATCH_MARKER}\n\n公开资料卡来源，每批最多 6 个账号。",
         "draft": False, "prerelease": False, "make_latest": "false",
     })
     return validate_release(release, tag)
@@ -244,8 +255,37 @@ def update_release(client, login, tag=TAG, contributors=()):
         raise VerificationError("This profile-card release already has six accounts.")
     body = release.get("body")
     updated = add_mention(body, login)
-    if updated != body:
+    if updated == body:
+        return False
+    try:
         client.request("PATCH", f"/releases/{release['id']}", {"body": updated})
+    except Exception as error:
+        # A network failure can happen after GitHub has applied the PATCH.
+        cleanup_release_mention(client, login, tag, error)
+        raise
+    return True
+
+
+def cleanup_release_mention(client, login, tag, original_error=None):
+    """Remove only the managed line this observation added, using fresh notes."""
+    try:
+        release = validate_release(client.request("GET", f"/releases/tags/{tag}"), tag)
+        body = release.get("body") or ""
+        starts, ends = body.count(MENTIONS_START), body.count(MENTIONS_END)
+        if starts == ends == 0:
+            return
+        if starts != 1 or ends != 1 or body.index(MENTIONS_START) >= body.index(MENTIONS_END):
+            raise VerificationError("The managed release section is malformed; the reservation could not be removed.")
+        start = body.index(MENTIONS_START) + len(MENTIONS_START)
+        end = body.index(MENTIONS_END)
+        section = re.sub(rf"^@{re.escape(login)}\r?\n", "", body[start:end], count=1, flags=re.IGNORECASE | re.MULTILINE)
+        updated = body[:start] + section + body[end:]
+        if updated != body:
+            client.request("PATCH", f"/releases/{release['id']}", {"body": updated})
+    except Exception as cleanup_error:
+        if original_error is not None:
+            raise ExceptionGroup("Profile verification and Release reservation cleanup both failed.", [original_error, cleanup_error]) from None
+        raise
 
 
 def is_profile_url(value, login):
@@ -342,6 +382,7 @@ def observe_profile(login, client=None, source_url=RELEASE_URL):
                    and len(release_members(release)) < RELEASE_CAPACITY]
             )
             selected = None
+            reservation_added = False
             for release in candidates:
                 source_url = release["html_url"]
                 links = contributors_at(source_url)
@@ -355,20 +396,29 @@ def observe_profile(login, client=None, source_url=RELEASE_URL):
                     if valid_login(name) and is_profile_url(href, name):
                         contributors.add(name.casefold())
                 if existing or len(release_members(release) | contributors) < RELEASE_CAPACITY:
-                    update_release(client, login, release["tag_name"], contributors)
+                    reservation_added = update_release(client, login, release["tag_name"], contributors)
                     selected = release
                     break
             if selected is None:
-                selected = create_profile_release(client, login, occupied)
+                selected = create_profile_release(client, occupied)
+                reservation_added = update_release(client, login, selected["tag_name"])
             source_url = selected["html_url"]
             # A single reservation is followed by bounded waits for GitHub's Contributors update.
-            for attempt in range(6):
-                if attempt:
-                    page.wait_for_timeout(5000)
-                result = read_matching(contributors_at(source_url), source_url)
-                if result:
-                    return result
-            return {"status": "unavailable", "releaseUrl": source_url, "message": "GitHub did not expose this login in the public Contributors list after the release update."}
+            result = None
+            try:
+                for attempt in range(6):
+                    if attempt:
+                        page.wait_for_timeout(5000)
+                    result = read_matching(contributors_at(source_url), source_url)
+                    if result:
+                        break
+            except Exception as error:
+                if reservation_added:
+                    cleanup_release_mention(client, login, selected["tag_name"], error)
+                raise
+            if reservation_added and (result is None or result["status"] != "verified"):
+                cleanup_release_mention(client, login, selected["tag_name"])
+            return result or {"status": "unavailable", "releaseUrl": source_url, "message": "GitHub did not expose this login in the public Contributors list after the release update."}
         finally:
             browser.close()
 

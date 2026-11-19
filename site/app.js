@@ -30,15 +30,19 @@ const pageSelect = document.querySelector("#page-select");
 const pageSummary = document.querySelector("#page-summary");
 const verifiedProfiles = new Map();
 const galleryPages = new Map();
+const publishedLogins = new Set();
 const excludedProfiles = new Set();
 const publicProfiles = new Map();
+const galleryPageSize = 6;
 let currentProfile;
 let profileIndex;
 let indexPromise;
-let cardPage = 1;
+let galleryView = { source: "published", page: 1 };
 let galleryLoading = false;
 let galleryError = "";
+let publicationError = "";
 let galleryLoadId = 0;
+let gallerySnapshotId = 0;
 let activeRequest;
 
 class ApiError extends Error {
@@ -107,7 +111,7 @@ function parseIssue(issue) {
   const login = issue.body.match(/^GitHub username: ([^\r\n]+)\r?$/m)?.[1];
   if (!requestId || !uuidPattern.test(requestId) || !login || normalizedLogin(login) !== login) return null;
   if (issue.title !== `Verify profile: ${login}` || !Number.isSafeInteger(issue.number) || issue.number < 1) return null;
-  return { login, requestId };
+  return { login, requestId: requestId.toLowerCase() };
 }
 
 function retryTime(response) {
@@ -285,16 +289,42 @@ function rememberVerified(result, issueNumber) {
   if (excludedProfiles.has(key)) return;
   const previous = verifiedProfiles.get(key);
   if (!previous || Date.parse(result.observedAt) >= Date.parse(previous.observedAt)) {
-    verifiedProfiles.set(key, { ...result, issueNumber });
+    verifiedProfiles.set(key, { ...result, issueNumber, pendingPublication: result.pendingPublication === true && !publishedLogins.has(key) });
+  } else if (publishedLogins.has(key)) {
+    previous.pendingPublication = false;
   }
 }
 
+function rememberPublished(profile) {
+  publishedLogins.add(profile.login.toLowerCase());
+  rememberVerified(profile, profile.issueNumber);
+}
+
+function galleryLayout() {
+  const pending = [...verifiedProfiles.values()].filter((profile) => profile.pendingPublication &&
+    !excludedProfiles.has(profile.login.toLowerCase()));
+  const pendingPages = Math.ceil(pending.length / galleryPageSize);
+  const publishedPages = profileIndex ? (profileIndex.total ? profileIndex.pageCount : 0) : 1;
+  return { pending, pendingPages, pageCount: Math.max(1, pendingPages + publishedPages) };
+}
+
+function selectedGalleryPage() {
+  return galleryView.page + (galleryView.source === "published" ? galleryLayout().pendingPages : 0);
+}
+
 function renderGallery() {
-  const pageCount = profileIndex?.pageCount || 1;
-  const profiles = (galleryPages.get(cardPage) || []).filter((profile) => !excludedProfiles.has(profile.login.toLowerCase()));
+  const { pending, pendingPages, pageCount } = galleryLayout();
+  // Publication or exclusion can remove the selected pending page.
+  if (galleryView.source === "pending" && galleryView.page > pendingPages) {
+    galleryView = pendingPages ? { source: "pending", page: pendingPages } : { source: "published", page: 1 };
+  }
+  if (galleryView.source === "published" && profileIndex?.total === 0 && pendingPages) {
+    galleryView = { source: "pending", page: 1 };
+  }
+  const isPending = galleryView.source === "pending";
+  const profiles = isPending ? [] : (galleryPages.get(galleryView.page) || []).filter((profile) => !excludedProfiles.has(profile.login.toLowerCase()));
   cardResult.replaceChildren(...profiles.map((profile) => renderCard(verifiedProfiles.get(profile.login.toLowerCase()) || profile)));
-  const recent = [...verifiedProfiles.values()].filter((profile) => profile.pendingPublication &&
-    !excludedProfiles.has(profile.login.toLowerCase()) && !profiles.some((item) => item.login.toLowerCase() === profile.login.toLowerCase()));
+  const recent = isPending ? pending.slice((galleryView.page - 1) * galleryPageSize, galleryView.page * galleryPageSize) : [];
   document.querySelector("#recent-cards").replaceChildren(...recent.map(renderCard));
   const options = Array.from({ length: pageCount }, (_, index) => {
     const option = document.createElement("option");
@@ -303,18 +333,22 @@ function renderGallery() {
     return option;
   });
   pageSelect.replaceChildren(...options);
+  const cardPage = selectedGalleryPage();
+  const pageUnknown = !profileIndex && galleryView.source === "published";
   pageSelect.value = String(cardPage);
-  pageSelect.disabled = pageCount === 1;
-  previousPage.disabled = cardPage === 1;
-  nextPage.disabled = cardPage === pageCount;
-  pageSummary.textContent = `第 ${cardPage} / ${pageCount} 页`;
-  galleryRetry.hidden = !galleryError;
+  pageSelect.disabled = galleryLoading || pageUnknown || pageCount === 1;
+  previousPage.disabled = galleryLoading || pageUnknown || cardPage === 1;
+  nextPage.disabled = galleryLoading || pageUnknown || cardPage === pageCount;
+  pageSummary.textContent = pageUnknown ? (galleryLoading ? "正在读取页码…" : "页码暂不可用") : `第 ${cardPage} / ${pageCount} 页`;
+  galleryRetry.hidden = !galleryError && !publicationError;
   galleryRetry.disabled = galleryLoading;
-  galleryStatus.hidden = !galleryLoading && !galleryError && !excludedProfiles.size && profiles.length > 0;
+  galleryStatus.hidden = !galleryLoading && !galleryError && !publicationError && !excludedProfiles.size && profiles.length + recent.length > 0;
   if (galleryLoading) {
     galleryStatus.textContent = "正在读取已核验账号…";
   } else if (galleryError) {
     galleryStatus.textContent = galleryError;
+  } else if (publicationError) {
+    galleryStatus.textContent = publicationError;
   } else if (excludedProfiles.size) {
     galleryStatus.textContent = "不符合条件的账号已移除，账号数量和分页将在发布后更新。";
   } else {
@@ -326,15 +360,18 @@ async function loadProfileIndex() {
   if (profileIndex) return profileIndex;
   if (!indexPromise) {
     const request = { controller: new AbortController() };
-    indexPromise = readJson(new URL("index.json", profileRoot).href, request).then((index) => {
+    const snapshot = gallerySnapshotId;
+    const pending = readJson(new URL("index.json", profileRoot).href, request).then((index) => {
       if (!index || !Number.isSafeInteger(index.total) || index.total < 0 ||
-          !Number.isSafeInteger(index.pageSize) || index.pageSize < 1 ||
+          index.pageSize !== galleryPageSize ||
+          (index.snapshotId !== undefined && (typeof index.snapshotId !== "string" || !uuidPattern.test(index.snapshotId))) ||
           index.pageCount !== Math.max(1, Math.ceil(index.total / index.pageSize))) {
         throw new Error("Invalid profile index");
       }
-      profileIndex = index;
+      if (snapshot === gallerySnapshotId) profileIndex = index;
       return index;
-    }).finally(() => { indexPromise = undefined; });
+    }).finally(() => { if (indexPromise === pending) indexPromise = undefined; });
+    indexPromise = pending;
   }
   return indexPromise;
 }
@@ -342,29 +379,44 @@ async function loadProfileIndex() {
 function validateIndexedProfile(profile) {
   if (!profile || profile.status !== "verified" || profile.profilePageStatus !== 404 || normalizedLogin(profile.login || "") !== profile.login ||
       !Number.isSafeInteger(profile.issueNumber) || profile.issueNumber < 1 ||
+      (profile.snapshotId !== undefined && (typeof profile.snapshotId !== "string" || !uuidPattern.test(profile.snapshotId))) ||
       !uuidPattern.test(profile.requestId || "")) throw new Error("Invalid indexed profile");
   // Snapshot files are published by the repository's trusted indexing workflow.
   validateProfileFields(profile);
   return profile;
 }
 
-async function loadGallery(page = cardPage) {
+async function readIndexedProfile(request) {
+  const indexed = await readJson(new URL(`users/${request.login.toLowerCase()}.json`, profileRoot).href, request, true);
+  if (!indexed) return null;
+  const profile = validateIndexedProfile(indexed);
+  if (profile.login.toLowerCase() !== request.login.toLowerCase()) throw new Error("Indexed profile does not match the requested login");
+  return profile;
+}
+
+async function loadGallery(view = galleryView) {
   const loadId = ++galleryLoadId;
+  const snapshot = gallerySnapshotId;
   galleryLoading = true;
   galleryError = "";
   renderGallery();
   const request = { controller: new AbortController() };
   try {
-    await loadProfileIndex();
-    if (!galleryPages.has(page)) {
-      const profiles = await readJson(new URL(`pages/${page}.json`, profileRoot).href, request);
-      const expectedCount = Math.min(profileIndex.pageSize, profileIndex.total - (page - 1) * profileIndex.pageSize);
+    const index = await loadProfileIndex();
+    if (snapshot !== gallerySnapshotId) return;
+    // A new publication can remove pages after excluded accounts are deleted.
+    if (view.source === "published" && view.page > index.pageCount) view = { source: "published", page: 1 };
+    if (view.source === "published" && !galleryPages.has(view.page)) {
+      const profiles = await readJson(new URL(`pages/${view.page}.json`, profileRoot).href, request);
+      if (snapshot !== gallerySnapshotId) return;
+      const expectedCount = Math.min(index.pageSize, index.total - (view.page - 1) * index.pageSize);
       if (!Array.isArray(profiles) || profiles.length !== expectedCount) throw new Error("Invalid profile page");
       const validated = profiles.map(validateIndexedProfile);
-      for (const profile of validated) rememberVerified(profile, profile.issueNumber);
-      galleryPages.set(page, validated);
+      if (validated.some((profile) => profile.snapshotId !== index.snapshotId)) throw new Error("Profile page belongs to a different snapshot");
+      for (const profile of validated) rememberPublished(profile);
+      galleryPages.set(view.page, validated);
     }
-    if (loadId === galleryLoadId) cardPage = page;
+    if (loadId === galleryLoadId) galleryView = view;
   } catch (error) {
     if (loadId === galleryLoadId) {
       galleryError = error instanceof ApiError && error.status === 404
@@ -374,28 +426,96 @@ async function loadGallery(page = cardPage) {
   } finally {
     if (loadId === galleryLoadId) {
       galleryLoading = false;
-      renderGallery();
     }
+    renderGallery();
   }
 }
 
 async function changeCardPage(page) {
-  await loadGallery(page);
+  const { pendingPages } = galleryLayout();
+  const view = page <= pendingPages ? { source: "pending", page } : { source: "published", page: page - pendingPages };
+  if (view.source === "pending") {
+    galleryLoadId += 1;
+    galleryLoading = false;
+    galleryView = view;
+    renderGallery();
+  } else {
+    await loadGallery(view);
+  }
   document.querySelector("#gallery-heading").scrollIntoView({ block: "start" });
 }
 
-function reloadGallery() {
+async function refreshGallerySnapshot(view = { source: "published", page: 1 }) {
   // A publication can change both the index and its pages. Retry the complete
   // snapshot rather than retaining metadata from the failed read.
+  gallerySnapshotId += 1;
   profileIndex = undefined;
+  indexPromise = undefined;
   galleryPages.clear();
+  publishedLogins.clear();
+  const pending = galleryLayout().pending;
   verifiedProfiles.clear();
-  if (currentProfile?.status === "verified") rememberVerified(currentProfile, currentProfile.issueNumber);
-  cardPage = 1;
-  return loadGallery(1);
+  for (const profile of pending) rememberVerified(profile, profile.issueNumber);
+  galleryView = view;
+  await loadGallery(view);
 }
 
-async function complete(request, result) {
+async function reloadGallery() {
+  publicationError = "";
+  await refreshGallerySnapshot();
+  const request = activeRequest;
+  const profile = currentProfile;
+  if (request && profile?.status === "verified" && profile.profilePageStatus === 404) {
+    await updatePublication(request, profile);
+  }
+}
+
+async function updatePublication(request, result, indexedProfile) {
+  const key = result.login.toLowerCase();
+  try {
+    if (indexedProfile || !publishedLogins.has(key)) {
+      const indexed = indexedProfile || await readIndexedProfile(request);
+      if (!current(request)) return;
+      if (indexed) {
+        await loadProfileIndex();
+        if (!current(request)) return;
+        const sameSnapshot = () => indexed.snapshotId && indexed.snapshotId === profileIndex?.snapshotId;
+        if (!sameSnapshot()) {
+          const view = galleryView.source === "published" ? galleryView : { source: "published", page: 1 };
+          await refreshGallerySnapshot(view);
+          if (!current(request)) return;
+          // Legacy files have no snapshot ID. A freshly loaded page containing
+          // this account is still direct evidence; otherwise ask for a reload.
+          if (!sameSnapshot() && !(!indexed.snapshotId && !profileIndex?.snapshotId && publishedLogins.has(key))) {
+            throw new Error("The user file and gallery index do not describe the same snapshot");
+          }
+        }
+        rememberPublished(indexed);
+      }
+    }
+    publicationError = "";
+    rememberVerified({ ...result, pendingPublication: !publishedLogins.has(key) }, result.issueNumber);
+    const newest = verifiedProfiles.get(key);
+    if (newest && Date.parse(newest.observedAt) > Date.parse(currentProfile.observedAt)) {
+      currentProfile = newest;
+      currentCard.replaceChildren(renderCard(currentProfile));
+    }
+    const { pending } = galleryLayout();
+    const position = pending.findIndex((profile) => profile.login.toLowerCase() === key);
+    if (position >= 0) {
+      galleryLoadId += 1;
+      galleryLoading = false;
+      galleryView = { source: "pending", page: Math.floor(position / galleryPageSize) + 1 };
+    }
+    renderGallery();
+  } catch (error) {
+    if (!current(request)) return;
+    publicationError = "资料卡已读取，但暂时无法确认账号列表的发布状态，请重新读取账号列表。";
+    renderGallery();
+  }
+}
+
+async function complete(request, result, indexedProfile) {
   clearTimeout(request.timer);
   resumeButton.hidden = true;
   if (result.status === "excluded") {
@@ -409,18 +529,19 @@ async function complete(request, result) {
     return;
   }
   if (result.status === "verified") {
-    currentProfile = { ...result, issueNumber: request.issueNumber };
+    const known = verifiedProfiles.get(result.login.toLowerCase());
+    currentProfile = known && Date.parse(known.observedAt) > Date.parse(result.observedAt)
+      ? known : { ...result, issueNumber: request.issueNumber };
     currentCard.replaceChildren(renderCard(currentProfile));
     // The compact card already contains the same request link.
     issueLink.hidden = true;
     if (result.profilePageStatus === 404) {
       excludedProfiles.delete(result.login.toLowerCase());
-      rememberVerified(result, request.issueNumber);
-      renderGallery();
     }
     showStatus("已找到资料卡", result.profilePageStatus === 404
       ? `@${result.login} · 资料卡已显示在搜索框下，可以抬走了`
       : `@${result.login} · 已显示历史资料；记录未确认主页返回 404，因此不加入英灵殿。`, "success");
+    if (result.profilePageStatus === 404) await updatePublication(request, currentProfile, indexedProfile);
   } else if (result.status === "unavailable") {
     showStatus("本次未能在来源页确认资料卡", typeof result.message === "string" && result.message ? result.message : "来源页未返回此用户的可用资料卡；这不代表账号不存在。", "unavailable");
   } else {
@@ -472,7 +593,7 @@ async function poll(request) {
       showStatus("已收到查询请求，正在实时核验", `@${request.login} · 可以留在此页，结果将自动显示。`);
       const result = await findResult(request);
       if (!current(request)) return;
-      if (result) { await complete(request, { ...result, pendingPublication: true }); return; }
+      if (result) { await complete(request, result); return; }
     }
     if (current(request)) {
       const interval = Date.now() - request.startedAt < 2 * 60 * 1000 ? 20000 : 30000;
@@ -491,6 +612,8 @@ function submitVerification(request) {
   issueUrl.searchParams.set("body", `${requestMarker}\n\nRequest ID: ${request.requestId}\n\nGitHub username: ${request.login}`);
   submitLink.href = issueUrl.href;
   submitLink.hidden = false;
+  resumeButton.hidden = false;
+  resumeButton.textContent = "检查提交结果";
   history.replaceState(null, "", `?${new URLSearchParams({ login: request.login })}`);
   submitPrivacy.hidden = false;
   showStatus("暂未找到可展示的资料", `@${request.login} · 公开接口未返回资料，可前往 GitHub 提交 Release 资料卡核验，**也可能是你写错了名字**`, "unavailable");
@@ -508,26 +631,26 @@ form.addEventListener("submit", async (event) => {
   activeRequest = request;
   showStatus("正在查询已有资料", `@${login} · 优先读取已核验账号，无需重复提交。`);
   try {
-    let profile = publicProfiles.get(login.toLowerCase());
-    if (profile) { showPublicProfile(profile); return; }
-    profile = verifiedProfiles.get(login.toLowerCase());
-    if (!profile) {
-      const publicProfile = await lookupPublicProfile(request);
-      if (!current(request)) return;
-      if (publicProfile) { showPublicProfile(publicProfile); return; }
-    }
+    let profile = verifiedProfiles.get(login.toLowerCase());
+    let indexedProfile;
+    const cachedPublic = publicProfiles.get(login.toLowerCase());
+    if (!profile && cachedPublic) { showPublicProfile(cachedPublic); return; }
     if (!profile && !excludedProfiles.has(login.toLowerCase())) {
-      const indexed = await readJson(new URL(`users/${login.toLowerCase()}.json`, profileRoot).href, request, true);
-      if (indexed) profile = validateIndexedProfile(indexed);
+      profile = await readIndexedProfile(request);
+      if (!current(request)) return;
+      indexedProfile = profile;
     }
     if (!current(request)) return;
     if (profile) {
       request.requestId = profile.requestId;
       request.login = profile.login;
       issueFound(request, profile.issueNumber);
-      await complete(request, profile);
+      await complete(request, profile, indexedProfile);
       return;
     }
+    const publicProfile = publicProfiles.get(login.toLowerCase()) || await lookupPublicProfile(request);
+    if (!current(request)) return;
+    if (publicProfile) { showPublicProfile(publicProfile); return; }
     submitVerification(request);
   } catch (error) {
     if (!current(request)) return;
@@ -537,8 +660,8 @@ form.addEventListener("submit", async (event) => {
 });
 
 loginInput.addEventListener("input", () => loginInput.setCustomValidity(""));
-previousPage.addEventListener("click", () => changeCardPage(cardPage - 1));
-nextPage.addEventListener("click", () => changeCardPage(cardPage + 1));
+previousPage.addEventListener("click", () => changeCardPage(selectedGalleryPage() - 1));
+nextPage.addEventListener("click", () => changeCardPage(selectedGalleryPage() + 1));
 pageSelect.addEventListener("change", () => changeCardPage(Number(pageSelect.value)));
 galleryRetry.addEventListener("click", reloadGallery);
 submitLink.addEventListener("click", () => {
@@ -561,7 +684,6 @@ resumeButton.addEventListener("click", () => {
   }
   request.deadline = Date.now() + 10 * 60 * 1000;
   clearTimeout(request.timer);
-  resumeButton.hidden = true;
   showStatus("正在继续等待", request.issueNumber ? "正在读取核验结果。" : "正在查找已提交的 GitHub 查询请求。");
   poll(request);
 });
