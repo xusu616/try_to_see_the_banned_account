@@ -1,0 +1,24 @@
+name: Test live profile requests
+on:
+  push:
+    branches: ['codex/test-profile-requests-d74pjp']
+permissions:
+  issues: write
+  actions: write
+jobs:
+  request:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create and verify two profile requests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: xusu616/try_to_see_the_banned_account
+        shell: bash
+        run: |
+          for login in rD227 xusu616; do
+            request_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+            body=$(printf '<!-- profile-card-request -->\n\nRequest ID: %s\n\nGitHub username: %s\n' "$request_id" "$login")
+            issue=$(jq -n --arg title "Verify profile: $login" --arg body "$body" '{title:$title,body:$body}' | gh api --method POST "repos/$GH_REPO/issues" --input - --jq .number)
+            printf 'Issue %s for %s (%s)\n' "$issue" "$login" "$request_id"
+            gh workflow run verify-profile.yml --ref main -f issue_number="$issue"
+          done
