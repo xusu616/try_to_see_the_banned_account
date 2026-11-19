@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from scripts.profile_index import export_index, open_index, refresh_bios, store_result, sync_index
-from scripts.verify_profile import API_ROOT, REQUEST_MARKER, ProfileRequest, VerificationError, make_result, result_body
+from scripts.verify_profile import API_ROOT, RELEASE_URL, REQUEST_MARKER, ProfileRequest, VerificationError, make_result, result_body
 
 
 REQUEST_ID = "95b7e76a-df4b-4d91-b507-bcf5bed45e44"
@@ -103,10 +103,18 @@ class IndexTests(unittest.TestCase):
             store_result(connection, profile, request())
             with patch("scripts.verify_profile.observe_profile", return_value={"status": "verified", "bio": "first\nsecond", "message": "Reobserved."}) as observe:
                 refresh_bios(connection)
-            observe.assert_called_once_with("rD227")
+            observe.assert_called_once_with("rD227", source_url=RELEASE_URL)
             profile = json.loads(connection.execute("SELECT result FROM profiles").fetchone()[0])
             self.assertEqual(profile["bioFormatVersion"], 2)
             self.assertEqual(profile["bio"], "first\nsecond")
+
+    def test_new_release_source_survives_indexing_and_export(self):
+        with closing(open_index(":memory:")) as connection, TemporaryDirectory() as directory:
+            profile = {**result(), "releaseUrl": RELEASE_URL.removesuffix("v0.1.1") + "v0.1.2"}
+            store_result(connection, profile, request())
+            export_index(connection, Path(directory))
+            saved = json.loads((Path(directory) / "profiles" / "users" / "rd227.json").read_text())
+            self.assertEqual(saved["releaseUrl"], profile["releaseUrl"])
 
     def test_sync_non404_removes_existing_record_and_never_admits_visible_user(self):
         for status in (200, 301, 302):

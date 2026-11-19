@@ -11,8 +11,8 @@ import sqlite3
 from urllib.parse import parse_qsl, urlsplit
 
 from scripts.verify_profile import (
-    API_ROOT, RELEASE_URL, RESULT_JSON, GitHubClient, VerificationError,
-    is_avatar_url, parse_request, profile_page_status,
+    API_ROOT, RESULT_JSON, GitHubClient, VerificationError,
+    is_avatar_url, is_release_url, parse_request, profile_page_status,
 )
 
 
@@ -57,7 +57,7 @@ def validate_result(result, request):
         or result.get("requestId") != request.request_id
         or not isinstance(result.get("login"), str)
         or result["login"].casefold() != request.login.casefold()
-        or result.get("releaseUrl") != RELEASE_URL
+        or not is_release_url(result.get("releaseUrl"))
         or any(not isinstance(result.get(field), str) for field in ("name", "bio", "badge", "avatarUrl", "observedAt"))
         or result["badge"] not in ("", "PRO")
     ):
@@ -125,7 +125,7 @@ def sync_index(connection, client, now=None):
                         result.get("requestId") != request.request_id
                         or not isinstance(result.get("login"), str)
                         or result["login"].casefold() != request.login.casefold()
-                        or result.get("releaseUrl") != RELEASE_URL
+                        or not is_release_url(result.get("releaseUrl"))
                         or type(result.get("profilePageStatus")) is not int
                         or not 200 <= result["profilePageStatus"] < 500
                         or result["profilePageStatus"] in (403, 404, 429)
@@ -198,7 +198,7 @@ def refresh_bios(connection):
                 connection.execute("DELETE FROM profiles WHERE login = ?", (result["login"],))
             continue
         # Migration reads an already visible contributor. It never edits the Release.
-        observation = observe_profile(result["login"])
+        observation = observe_profile(result["login"], source_url=result["releaseUrl"])
         if observation["status"] != "verified":
             continue
         request = ProfileRequest(result["issueNumber"], result["requestId"], result["login"])

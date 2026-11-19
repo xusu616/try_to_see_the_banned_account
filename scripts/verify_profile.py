@@ -23,6 +23,8 @@ REQUEST_MARKER = "<!-- profile-card-request -->"
 RESULT_MARKER = "<!-- profile-card-result -->"
 MENTIONS_START = "<!-- profile-card-mentions:start -->"
 MENTIONS_END = "<!-- profile-card-mentions:end -->"
+BATCH_MARKER = "<!-- profile-card-batch -->"
+RELEASE_CAPACITY = 6
 USERNAME = re.compile(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", re.ASCII)
 REQUEST_ID = re.compile(
     r"^Request ID: ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
@@ -100,7 +102,7 @@ class GitHubClient:
             raise VerificationError("GITHUB_TOKEN is required.")
         self.token = token
 
-    def request(self, method, path, payload=None):
+    def request(self, method, path, payload=None, allow_missing=False):
         # Paths are built exclusively from fixed strings and validated numeric IDs.
         data = None if payload is None else json.dumps(payload).encode("utf-8")
         request = Request(
@@ -119,6 +121,9 @@ class GitHubClient:
             with urlopen(request, timeout=30) as response:
                 return json.load(response)
         except HTTPError as error:
+            if allow_missing and error.code == 404:
+                error.close()
+                return None
             # Never publish response bodies, headers, credentials, or request objects.
             raise VerificationError(f"GitHub REST API returned HTTP {error.code}.") from None
         except (URLError, TimeoutError) as error:
@@ -170,19 +175,77 @@ def add_mention(body, login):
     return body[:end] + separator + f"@{login}\n" + body[end:]
 
 
-def update_release(client, login):
-    release = client.request("GET", f"/releases/tags/{TAG}")
+def is_release_url(value):
+    return isinstance(value, str) and re.fullmatch(
+        re.escape(f"https://github.com/{REPOSITORY}/releases/tag/") + r"v0\.1\.[1-9][0-9]*", value
+    ) is not None
+
+
+def validate_release(release, tag):
     release_id = release.get("id")
     if (
         type(release_id) is not int or release_id < 1
-        or release.get("tag_name") != TAG or release.get("draft") is not False
-        or release.get("html_url") != RELEASE_URL
+        or release.get("tag_name") != tag or release.get("draft") is not False
+        or release.get("html_url") != f"https://github.com/{REPOSITORY}/releases/tag/{tag}"
+        or not is_release_url(release.get("html_url"))
     ):
-        raise VerificationError("The fixed public release could not be confirmed.")
+        raise VerificationError("The public profile-card release could not be confirmed.")
+    return release
+
+
+def release_members(release):
+    body = release.get("body") or ""
+    # Include mentions outside the managed section in the original Release too.
+    # Managed entries reserve slots while GitHub updates Contributors asynchronously.
+    return {name.casefold() for name in re.findall(r"(?<![\w/@])@([A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)", body) if valid_login(name)}
+
+
+def release_catalog(client):
+    releases, occupied = [], set()
+    page = 1
+    while True:
+        batch = client.request("GET", f"/releases?per_page=100&page={page}")
+        if not isinstance(batch, list):
+            raise VerificationError("GitHub returned an invalid release collection.")
+        for release in batch:
+            tag = release.get("tag_name", "")
+            if not re.fullmatch(r"v0\.1\.[1-9][0-9]*", tag):
+                continue
+            occupied.add(int(tag.rsplit(".", 1)[1]))
+            if tag == TAG or BATCH_MARKER in (release.get("body") or ""):
+                releases.append(validate_release(release, tag))
+        if len(batch) < 100:
+            break
+        page += 1
+    if not any(release["tag_name"] == TAG for release in releases):
+        raise VerificationError("The original profile-card release is missing.")
+    releases.sort(key=lambda release: int(release["tag_name"].rsplit(".", 1)[1]), reverse=True)
+    return releases, occupied
+
+
+def create_profile_release(client, login, occupied):
+    patch_number = max(occupied) + 1
+    # A version may already name a tag without a Release; leave that tag alone.
+    while client.request("GET", f"/git/ref/tags/v0.1.{patch_number}", allow_missing=True) is not None:
+        patch_number += 1
+    tag = f"v0.1.{patch_number}"
+    release = client.request("POST", "/releases", {
+        "tag_name": tag, "target_commitish": "main", "name": f"英灵殿资料卡 · {tag}",
+        "body": add_mention(f"{BATCH_MARKER}\n\n公开资料卡来源，每批最多 6 个账号。", login),
+        "draft": False, "prerelease": False, "make_latest": "false",
+    })
+    return validate_release(release, tag)
+
+
+def update_release(client, login, tag=TAG, contributors=()):
+    release = validate_release(client.request("GET", f"/releases/tags/{tag}"), tag)
+    members = release_members(release) | set(contributors)
+    if login.casefold() not in members and len(members) >= RELEASE_CAPACITY:
+        raise VerificationError("This profile-card release already has six accounts.")
     body = release.get("body")
     updated = add_mention(body, login)
     if updated != body:
-        client.request("PATCH", f"/releases/{release_id}", {"body": updated})
+        client.request("PATCH", f"/releases/{release['id']}", {"body": updated})
 
 
 def is_profile_url(value, login):
@@ -229,7 +292,7 @@ def read_hovercard(card, login):
     return {"name": name, "bio": bio, "avatarUrl": avatar_url, "badge": badge}
 
 
-def observe_profile(login, client=None):
+def observe_profile(login, client=None, source_url=RELEASE_URL):
     # The browser has a fresh anonymous context. The REST token is never provided to it.
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 
@@ -238,14 +301,19 @@ def observe_profile(login, client=None):
         try:
             page = browser.new_page(locale="en-US", viewport={"width": 1280, "height": 900})
             page.set_default_timeout(15000)
-            updated = False
-            for attempt in range(7 if client else 1):
-                response = page.goto(RELEASE_URL, wait_until="domcontentloaded", timeout=30000)
-                if response is None or response.status >= 400 or page.url != RELEASE_URL:
+            if not is_release_url(source_url):
+                raise VerificationError("The profile-card source URL is invalid.")
+
+            def contributors_at(url):
+                response = page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                if response is None or response.status >= 400 or page.url != url:
                     raise VerificationError("GitHub's public release page could not be loaded.")
                 heading = page.get_by_role("heading", name="Contributors", exact=True)
                 contributors = page.locator(".Box-footer").filter(has=heading)
                 links = contributors.locator('a[data-hovercard-type="user"]')
+                return links
+
+            def read_matching(links, url):
                 for index in range(links.count()):
                     link = links.nth(index)
                     if not is_profile_url(link.get_attribute("href"), login):
@@ -255,16 +323,52 @@ def observe_profile(login, client=None):
                     try:
                         card.wait_for(state="visible", timeout=15000)
                     except PlaywrightTimeoutError:
-                        return {"status": "unavailable", "message": "GitHub did not show a public hovercard for this contributor."}
-                    return {"status": "verified", "message": "Read from the contributor's native GitHub hovercard.", **read_hovercard(card, login)}
-                if client and not updated:
-                    # Read existing contributors first; only a missing login needs a notes edit.
-                    update_release(client, login)
-                    updated = True
-                elif attempt < 6 and client:
-                    # GitHub updates the native Contributors list asynchronously after a notes edit.
+                        return {"status": "unavailable", "releaseUrl": url, "message": "GitHub did not show a public hovercard for this contributor."}
+                    return {"status": "verified", "releaseUrl": url, "message": "Read from the contributor's native GitHub hovercard.", **read_hovercard(card, login)}
+                return None
+
+            if not client:
+                result = read_matching(contributors_at(source_url), source_url)
+                return result or {"status": "unavailable", "releaseUrl": source_url, "message": "The existing contributor did not expose a public hovercard."}
+
+            releases, occupied = release_catalog(client)
+            existing = [release for release in releases if login.casefold() in release_members(release)]
+            # Metadata locates existing accounts without opening every Release in a browser.
+            # The original Release can have contributors outside the managed notes.
+            # Check it first so those accounts are not assigned a second slot.
+            candidates = existing or (
+                [release for release in releases if release["tag_name"] == TAG]
+                + [release for release in releases if release["tag_name"] != TAG
+                   and len(release_members(release)) < RELEASE_CAPACITY]
+            )
+            selected = None
+            for release in candidates:
+                source_url = release["html_url"]
+                links = contributors_at(source_url)
+                result = read_matching(links, source_url)
+                if result:
+                    return result
+                contributors = set()
+                for index in range(links.count()):
+                    href = links.nth(index).get_attribute("href")
+                    name = urlsplit(urljoin("https://github.com", href or "")).path.strip("/")
+                    if valid_login(name) and is_profile_url(href, name):
+                        contributors.add(name.casefold())
+                if existing or len(release_members(release) | contributors) < RELEASE_CAPACITY:
+                    update_release(client, login, release["tag_name"], contributors)
+                    selected = release
+                    break
+            if selected is None:
+                selected = create_profile_release(client, login, occupied)
+            source_url = selected["html_url"]
+            # A single reservation is followed by bounded waits for GitHub's Contributors update.
+            for attempt in range(6):
+                if attempt:
                     page.wait_for_timeout(5000)
-            return {"status": "unavailable", "message": "GitHub did not expose this login in the public Contributors list after the release update."}
+                result = read_matching(contributors_at(source_url), source_url)
+                if result:
+                    return result
+            return {"status": "unavailable", "releaseUrl": source_url, "message": "GitHub did not expose this login in the public Contributors list after the release update."}
         finally:
             browser.close()
 
@@ -278,7 +382,7 @@ def make_result(request, observation):
         "bio": observation.get("bio", ""),
         "avatarUrl": observation.get("avatarUrl", ""),
         "badge": observation.get("badge", ""),
-        "releaseUrl": RELEASE_URL,
+        "releaseUrl": observation.get("releaseUrl", RELEASE_URL),
         "observedAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "message": observation["message"],
         "bioFormatVersion": 2,
@@ -309,7 +413,7 @@ def previous_result(comments, request):
             continue
         if (
             isinstance(result, dict) and result.get("requestId") == request.request_id
-            and result.get("login") == request.login and result.get("releaseUrl") == RELEASE_URL
+            and result.get("login") == request.login and is_release_url(result.get("releaseUrl"))
             and result.get("status") in ("verified", "unavailable", "error", "excluded")
         ):
             return comment, result

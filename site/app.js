@@ -2,7 +2,6 @@
 
 const repository = "https://github.com/xusu616/try_to_see_the_banned_account";
 const api = "https://api.github.com/repos/xusu616/try_to_see_the_banned_account";
-const releaseUrl = `${repository}/releases/tag/v0.1.1`;
 const publicSite = "https://xusu616.github.io/try_to_see_the_banned_account/";
 // file:// cannot fetch adjacent JSON. Direct local previews use the same public
 // snapshot as the published site; HTTP previews read their own generated files.
@@ -19,14 +18,12 @@ const statusTitle = document.querySelector("#status-title");
 const statusDetail = document.querySelector("#status-detail");
 const submitLink = document.querySelector("#submit-link");
 const issueLink = document.querySelector("#issue-link");
-const shareButton = document.querySelector("#share-button");
 const resumeButton = document.querySelector("#resume-button");
-const shareStatus = document.querySelector("#share-status");
+const submitPrivacy = document.querySelector("#submit-privacy");
+const currentCard = document.querySelector("#current-card");
 const cardResult = document.querySelector("#card-result");
-const cardCount = document.querySelector("#card-count");
 const galleryStatus = document.querySelector("#gallery-status");
 const galleryRetry = document.querySelector("#gallery-retry");
-const refreshButton = document.querySelector("#refresh-button");
 const previousPage = document.querySelector("#previous-page");
 const nextPage = document.querySelector("#next-page");
 const pageSelect = document.querySelector("#page-select");
@@ -34,6 +31,7 @@ const pageSummary = document.querySelector("#page-summary");
 const verifiedProfiles = new Map();
 const galleryPages = new Map();
 const excludedProfiles = new Set();
+const publicProfiles = new Map();
 let currentProfile;
 let profileIndex;
 let indexPromise;
@@ -75,10 +73,11 @@ function resetRequest() {
   activeRequest = undefined;
   submitLink.hidden = true;
   issueLink.hidden = true;
-  shareButton.hidden = true;
   resumeButton.hidden = true;
-  refreshButton.hidden = true;
-  shareStatus.hidden = true;
+  resumeButton.textContent = "检查提交结果";
+  submitPrivacy.hidden = true;
+  currentProfile = undefined;
+  currentCard.replaceChildren();
 }
 
 function makeRequest(login, requestId, issueNumber = null) {
@@ -96,8 +95,9 @@ function issueFound(request, number) {
   request.issueNumber = number;
   issueLink.href = `${repository}/issues/${number}`;
   issueLink.hidden = false;
-  shareButton.hidden = false;
   submitLink.hidden = true;
+  submitPrivacy.hidden = true;
+  resumeButton.textContent = "继续等待核验结果";
   history.replaceState(null, "", `?${new URLSearchParams({ request: String(number) })}`);
 }
 
@@ -132,7 +132,7 @@ async function readJson(url, request, allowMissing = false) {
   request.controller.signal.addEventListener("abort", abort, { once: true });
   const timeout = setTimeout(abort, 15000);
   try {
-    const githubRequest = url.startsWith(api);
+    const githubRequest = url.startsWith("https://api.github.com/");
     const response = await fetch(url, {
       signal: controller.signal, cache: githubRequest ? "no-store" : "no-cache",
       headers: { Accept: githubRequest ? "application/vnd.github+json" : "application/json" },
@@ -188,8 +188,13 @@ function parseResult(comment, request) {
   return result;
 }
 
+function validReleaseUrl(value) {
+  if (typeof value !== "string" || !value.startsWith(`${repository}/releases/tag/`)) return false;
+  return /^v0\.1\.[1-9]\d*$/.test(value.slice(`${repository}/releases/tag/`.length));
+}
+
 function validateProfileFields(result) {
-  if (result.releaseUrl !== releaseUrl || typeof result.name !== "string" || typeof result.bio !== "string" ||
+  if (!validReleaseUrl(result.releaseUrl) || typeof result.name !== "string" || typeof result.bio !== "string" ||
         typeof result.avatarUrl !== "string" || typeof result.badge !== "string" ||
         !["", "PRO"].includes(result.badge) ||
         typeof result.observedAt !== "string" || !Number.isFinite(Date.parse(result.observedAt))) {
@@ -200,20 +205,43 @@ function validateProfileFields(result) {
 
 async function findResult(request) {
   // GitHub returns comments oldest first. A result may be beyond the first page.
+  let latest = null;
   for (let page = 1; ; page += 1) {
     const comments = await requestJson(`/issues/${request.issueNumber}/comments?per_page=100&page=${page}`, request);
     if (!Array.isArray(comments)) throw new Error("Invalid comment response");
     for (const comment of comments) {
       const result = parseResult(comment, request);
-      if (result) return result;
+      if (result && (!latest || Date.parse(result.observedAt) >= Date.parse(latest.observedAt))) latest = result;
     }
-    if (comments.length < 100 || !current(request)) return null;
+    if (comments.length < 100 || !current(request)) return latest;
   }
 }
 
 function profileBio(value) {
   // Some public bios contain the literal characters backslash + n instead of LF.
   return value.replace(/\\r\\n|\\n|\\r/g, "\n");
+}
+
+async function lookupPublicProfile(request) {
+  const user = await readJson(`https://api.github.com/users/${request.login}`, request, true);
+  if (!user) return null;
+  if (typeof user.login !== "string" || normalizedLogin(user.login) !== user.login ||
+      user.html_url !== `https://github.com/${user.login}` ||
+      (user.name !== null && typeof user.name !== "string") ||
+      (user.bio !== null && typeof user.bio !== "string")) throw new Error("Invalid public profile");
+  const profile = {
+    login: user.login, name: user.name || user.login, bio: user.bio || "",
+    avatarUrl: safeAvatar(user.avatar_url), badge: "", status: "public",
+    observedAt: new Date().toISOString(),
+  };
+  publicProfiles.set(request.login.toLowerCase(), profile);
+  return profile;
+}
+
+function showPublicProfile(profile) {
+  currentProfile = profile;
+  currentCard.replaceChildren(renderCard(profile));
+  showStatus("已找到公开资料", `@${profile.login} · 资料卡显示在这里，正常可见账号不加入英灵殿。`, "success");
 }
 
 function renderCard(result) {
@@ -239,8 +267,15 @@ function renderCard(result) {
   }
   const time = card.querySelector("time");
   time.dateTime = result.observedAt;
-  time.textContent = `核验于 ${new Date(result.observedAt).toLocaleString("zh-CN", { hour12: false })}`;
-  card.querySelector(".card-request-link").href = `?${new URLSearchParams({ request: String(result.issueNumber) })}`;
+  time.textContent = `${result.status === "public" ? "查询于" : "核验于"} ${new Date(result.observedAt).toLocaleString("zh-CN", { hour12: false })}`;
+  const source = card.querySelector(".profile-source-link");
+  source.href = result.status === "public" ? `https://github.com/${result.login}` : result.releaseUrl;
+  source.textContent = result.status === "public" ? "查看 GitHub 主页" : "查看 Release 来源";
+  const record = card.querySelector(".card-request-link");
+  if (result.issueNumber) {
+    record.href = `${repository}/issues/${result.issueNumber}`;
+    record.hidden = false;
+  }
   return card;
 }
 
@@ -258,10 +293,9 @@ function renderGallery() {
   const pageCount = profileIndex?.pageCount || 1;
   const profiles = (galleryPages.get(cardPage) || []).filter((profile) => !excludedProfiles.has(profile.login.toLowerCase()));
   cardResult.replaceChildren(...profiles.map((profile) => renderCard(verifiedProfiles.get(profile.login.toLowerCase()) || profile)));
-  const currentCard = document.querySelector("#current-card");
-  const showCurrent = currentProfile && !profiles.some((profile) => profile.login.toLowerCase() === currentProfile.login.toLowerCase());
-  currentCard.replaceChildren(...(showCurrent ? [renderCard(currentProfile)] : []));
-  cardCount.textContent = profileIndex ? `${excludedProfiles.size ? "列表更新中" : `${profileIndex.total} 个账号`} · 每页 ${profileIndex.pageSize} 个` : "";
+  const recent = [...verifiedProfiles.values()].filter((profile) => profile.pendingPublication &&
+    !excludedProfiles.has(profile.login.toLowerCase()) && !profiles.some((item) => item.login.toLowerCase() === profile.login.toLowerCase()));
+  document.querySelector("#recent-cards").replaceChildren(...recent.map(renderCard));
   const options = Array.from({ length: pageCount }, (_, index) => {
     const option = document.createElement("option");
     option.value = String(index + 1);
@@ -356,39 +390,41 @@ function reloadGallery() {
   profileIndex = undefined;
   galleryPages.clear();
   verifiedProfiles.clear();
-  if (currentProfile) rememberVerified(currentProfile, currentProfile.issueNumber);
+  if (currentProfile?.status === "verified") rememberVerified(currentProfile, currentProfile.issueNumber);
   cardPage = 1;
   return loadGallery(1);
 }
 
-function complete(request, result) {
+async function complete(request, result) {
   clearTimeout(request.timer);
   resumeButton.hidden = true;
   if (result.status === "excluded") {
     excludedProfiles.add(result.login.toLowerCase());
     verifiedProfiles.delete(result.login.toLowerCase());
-    if (currentProfile?.login.toLowerCase() === result.login.toLowerCase()) currentProfile = undefined;
     renderGallery();
-    showStatus("该账号不符合收录条件", `@${result.login} · 主页返回 HTTP ${result.profilePageStatus}，英灵殿只收录主页返回 404 的账号。`, "unavailable");
+    const profile = await lookupPublicProfile(request);
+    if (!current(request)) return;
+    if (profile) showPublicProfile(profile);
+    else showStatus("已查到主页核验记录", `@${result.login} · 核验时主页返回 HTTP ${result.profilePageStatus}，未收录到英灵殿。`, "success");
     return;
   }
   if (result.status === "verified") {
-    if (result.profilePageStatus !== 404) {
-      refreshButton.hidden = false;
-      showStatus("旧结果需要重新核验", "这条记录尚未确认主页是否返回 404，请点击“重新核验资料”。", "unavailable");
-      return;
+    currentProfile = { ...result, issueNumber: request.issueNumber };
+    currentCard.replaceChildren(renderCard(currentProfile));
+    // The compact card already contains the same request link.
+    issueLink.hidden = true;
+    if (result.profilePageStatus === 404) {
+      excludedProfiles.delete(result.login.toLowerCase());
+      rememberVerified(result, request.issueNumber);
+      renderGallery();
     }
-    excludedProfiles.delete(result.login.toLowerCase());
-    rememberVerified(result, request.issueNumber);
-    // A result is immediately reviewable even while the next Pages snapshot is building.
-    currentProfile = verifiedProfiles.get(result.login.toLowerCase());
-    renderGallery();
-    refreshButton.hidden = false;
-    showStatus("已找到资料卡", `@${result.login} · 已核验 Release 原页，资料卡已加入下方账号列表。`, "success");
+    showStatus("已找到资料卡", result.profilePageStatus === 404
+      ? `@${result.login} · 资料卡已显示在搜索框下，可以抬走了`
+      : `@${result.login} · 已显示历史资料；记录未确认主页返回 404，因此不加入英灵殿。`, "success");
   } else if (result.status === "unavailable") {
     showStatus("本次未能在来源页确认资料卡", typeof result.message === "string" && result.message ? result.message : "来源页未返回此用户的可用资料卡；这不代表账号不存在。", "unavailable");
   } else {
-    showStatus("本次核验未完成", typeof result.message === "string" && result.message ? result.message : "核验服务执行失败，可查看查询请求中的详情后重新查询。", "error");
+    showStatus("本次核验未完成", typeof result.message === "string" && result.message ? result.message : "核验服务执行失败，请打开“查看查询请求”了解详情。", "error");
   }
 }
 
@@ -396,19 +432,19 @@ function pauseForError(request, error) {
   resumeButton.hidden = false;
   if (error instanceof ApiError && (error.status === 403 || error.status === 429)) {
     request.retryAt = error.retryAt;
-    const when = error.retryAt ? `请在 ${new Date(error.retryAt).toLocaleTimeString("zh-CN", { hour12: false })} 后继续等待。` : "请稍后点击“继续等待”。";
+    const when = error.retryAt ? `请在 ${new Date(error.retryAt).toLocaleTimeString("zh-CN", { hour12: false })} 后点击“${resumeButton.textContent}”。` : `请稍后点击“${resumeButton.textContent}”。`;
     showStatus("GitHub 暂时限制了结果读取", `${when} 这不表示用户资料不可用。`, "error");
   } else if (error instanceof ApiError && error.status === 404) {
-    showStatus("查询请求暂时无法读取", "请确认请求链接有效且公开，再点击“继续等待”。", "error");
+    showStatus("查询请求暂时无法读取", `请确认请求链接有效且公开，再点击“${resumeButton.textContent}”。`, "error");
   } else {
-    showStatus("暂时无法读取查询结果", "网络或服务响应异常。可查看 GitHub 查询请求，恢复后点击“继续等待”。", "error");
+    showStatus("暂时无法读取查询结果", `网络或服务响应异常，恢复后点击“${resumeButton.textContent}”。`, "error");
   }
 }
 
 async function poll(request) {
   if (!current(request) || request.polling) return;
   if (Date.now() >= request.deadline) {
-    showStatus("已等待 10 分钟", request.issueNumber ? "任务可能仍在排队。可查看查询请求，或点击“继续等待”。" : "尚未找到提交记录。请先在 GitHub 确认提交，再点击“继续等待”。", "error");
+    showStatus("本次等待已暂停", request.issueNumber ? "任务可能仍在排队，可点击“继续等待核验结果”。" : "尚未找到提交记录，确认已在 GitHub 提交后，可点击“检查提交结果”。", "unavailable");
     resumeButton.hidden = false;
     return;
   }
@@ -436,7 +472,7 @@ async function poll(request) {
       showStatus("已收到查询请求，正在实时核验", `@${request.login} · 可以留在此页，结果将自动显示。`);
       const result = await findResult(request);
       if (!current(request)) return;
-      if (result) { complete(request, result); return; }
+      if (result) { await complete(request, { ...result, pendingPublication: true }); return; }
     }
     if (current(request)) {
       const interval = Date.now() - request.startedAt < 2 * 60 * 1000 ? 20000 : 30000;
@@ -456,8 +492,8 @@ function submitVerification(request) {
   submitLink.href = issueUrl.href;
   submitLink.hidden = false;
   history.replaceState(null, "", `?${new URLSearchParams({ login: request.login })}`);
-  showStatus("尚未收录，请提交核验请求", `@${request.login} · 点击“打开 GitHub 提交页面”确认一次，返回此页即可等待结果。`);
-  poll(request);
+  submitPrivacy.hidden = false;
+  showStatus("暂未找到可展示的资料", `@${request.login} · 公开接口未返回资料，可前往 GitHub 提交 Release 资料卡核验，**也可能是你写错了名字**`, "unavailable");
 }
 
 form.addEventListener("submit", async (event) => {
@@ -467,13 +503,19 @@ form.addEventListener("submit", async (event) => {
   if (!login) { loginInput.reportValidity(); return; }
   loginInput.value = login;
   resetRequest();
+  history.replaceState(null, "", `?${new URLSearchParams({ login })}`);
   const request = makeRequest(login, crypto.randomUUID());
   activeRequest = request;
   showStatus("正在查询已有资料", `@${login} · 优先读取已核验账号，无需重复提交。`);
   try {
-    await loadProfileIndex();
-    if (!current(request)) return;
-    let profile = verifiedProfiles.get(login.toLowerCase());
+    let profile = publicProfiles.get(login.toLowerCase());
+    if (profile) { showPublicProfile(profile); return; }
+    profile = verifiedProfiles.get(login.toLowerCase());
+    if (!profile) {
+      const publicProfile = await lookupPublicProfile(request);
+      if (!current(request)) return;
+      if (publicProfile) { showPublicProfile(publicProfile); return; }
+    }
     if (!profile && !excludedProfiles.has(login.toLowerCase())) {
       const indexed = await readJson(new URL(`users/${login.toLowerCase()}.json`, profileRoot).href, request, true);
       if (indexed) profile = validateIndexedProfile(indexed);
@@ -483,14 +525,14 @@ form.addEventListener("submit", async (event) => {
       request.requestId = profile.requestId;
       request.login = profile.login;
       issueFound(request, profile.issueNumber);
-      complete(request, profile);
-      showStatus("已找到已核验资料", `@${profile.login} · 资料卡已显示在下方，可按需重新核验。`, "success");
+      await complete(request, profile);
       return;
     }
     submitVerification(request);
   } catch (error) {
     if (!current(request)) return;
-    showStatus("暂时无法读取已有资料", "读取失败，请稍后再次查询；本次尚未创建核验请求。", "error");
+    showStatus("暂时无法读取资料", error instanceof ApiError && [403, 429].includes(error.status)
+      ? "可能是你输错了名字，或者GitHub 暂时限制了查询频率，请稍后查询。" : "网络或服务响应异常，请稍后查询。", "error");
   }
 });
 
@@ -499,12 +541,15 @@ previousPage.addEventListener("click", () => changeCardPage(cardPage - 1));
 nextPage.addEventListener("click", () => changeCardPage(cardPage + 1));
 pageSelect.addEventListener("change", () => changeCardPage(Number(pageSelect.value)));
 galleryRetry.addEventListener("click", reloadGallery);
-refreshButton.addEventListener("click", () => {
-  const login = activeRequest.login;
-  resetRequest();
-  const request = makeRequest(login, crypto.randomUUID());
-  activeRequest = request;
-  submitVerification(request);
+submitLink.addEventListener("click", () => {
+  const request = activeRequest;
+  clearTimeout(request.timer);
+  request.startedAt = Date.now();
+  request.deadline = request.startedAt + 10 * 60 * 1000;
+  resumeButton.hidden = false;
+  resumeButton.textContent = "检查提交结果";
+  showStatus("请在 GitHub 确认提交", "提交后返回此页，系统会检查核验结果。", "waiting");
+  poll(request);
 });
 
 resumeButton.addEventListener("click", () => {
@@ -515,25 +560,10 @@ resumeButton.addEventListener("click", () => {
     return;
   }
   request.deadline = Date.now() + 10 * 60 * 1000;
+  clearTimeout(request.timer);
   resumeButton.hidden = true;
   showStatus("正在继续等待", request.issueNumber ? "正在读取核验结果。" : "正在查找已提交的 GitHub 查询请求。");
   poll(request);
-});
-
-shareButton.addEventListener("click", async () => {
-  const request = activeRequest;
-  if (!request?.issueNumber) return;
-  const url = new URL(location.pathname, location.origin);
-  url.searchParams.set("request", String(request.issueNumber));
-  try {
-    await navigator.clipboard.writeText(url.href);
-    if (!current(request)) return;
-    shareStatus.textContent = "结果链接已复制，可直接打开查看本次核验。";
-  } catch {
-    if (!current(request)) return;
-    shareStatus.textContent = `请复制此链接：${url.href}`;
-  }
-  shareStatus.hidden = false;
 });
 
 async function initialize() {
@@ -543,13 +573,17 @@ async function initialize() {
   const issue = parameters.get("request");
   if (issue !== null) {
     if (!/^[1-9]\d*$/.test(issue) || !Number.isSafeInteger(Number(issue))) {
-      showStatus("查询链接无效", "请使用完整的结果分享链接，或输入用户名重新查询。", "error");
+      showStatus("查询链接无效", "请使用完整的查询请求链接，或输入用户名查询。", "error");
       return;
     }
     const request = makeRequest("", "", Number(issue));
     activeRequest = request;
     showStatus("正在读取查询请求", "正在从 GitHub 获取本次请求与核验结果。");
     poll(request);
+    return;
+  }
+  if (login) {
+    form.requestSubmit();
     return;
   }
   const legacyCard = parameters.get("card");

@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
-      group: profile-card-release-v0.1.1
+      group: profile-card-release-allocation
       queue: max
       cancel-in-progress: false
     permissions:
@@ -65,7 +65,7 @@ jobs:
         run: |
           python -m pip install playwright==1.65.2
           python -m playwright install --with-deps chromium
-      - name: Check existing contributor, add only when missing, and publish result
+      - name: Find existing contributor, allocate a six-account release, and publish result
         if: ${{ !cancelled() }}
         env:
           GITHUB_TOKEN: ${{ github.token }}

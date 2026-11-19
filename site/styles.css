@@ -44,7 +44,6 @@ button:hover { background: var(--accent-dark); }
 button:disabled { opacity: .45; cursor: default; }
 button:disabled:hover { background: var(--tint); }
 .hint { margin: .65rem 0 0; color: var(--muted); font-size: .81rem; }
-.privacy-hint { margin-top: .2rem; font-size: .76rem; }
 .result-section { margin-top: 1.5rem; }
 .request-status { display: flex; align-items: baseline; gap: .65rem; padding: 1rem; border: 1px solid var(--line); border-radius: .65rem; background: #ecf0e7; }
 .status-dot { flex: none; width: .5rem; height: .5rem; border-radius: 50%; background: var(--accent); }
@@ -60,12 +59,18 @@ button:disabled:hover { background: var(--tint); }
 .soft-button:hover { background: #d2e5d8; }
 .gallery-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: .3rem 1rem; }
 .gallery-heading h2 { margin: 0; font-size: 1.1rem; }
-#card-count { margin: 0; color: var(--muted); font-size: .8rem; }
 #gallery-retry { margin-top: .65rem; }
 .gallery-notice:has(#gallery-status:not([hidden])) { margin-top: 1rem; padding: 1rem 1.15rem; border: 1px solid var(--line); border-radius: .7rem; background: var(--surface); }
 .gallery-notice .hint { margin: 0; }
 .card-list { display: grid; gap: 1.2rem; margin-top: 1.2rem; }
 .card-list:empty { display: none; }
+.current-card:empty, .request-actions:not(:has(:not([hidden]))) { display: none; }
+.current-card { margin-top: .85rem; }
+.current-card .profile-card { padding: 1rem 1.15rem; border-top-width: 1px; box-shadow: none; }
+.current-card .avatar-frame { width: 3rem; height: 3rem; border-radius: .7rem; }
+.current-card .profile-name { font-size: 1.1rem; }
+.current-card .profile-bio { margin-top: .75rem; font-size: .86rem; }
+.current-card .profile-source { margin-top: .8rem; padding-top: .65rem; }
 .profile-card { min-width: 0; padding: clamp(1.15rem, 4vw, 1.65rem); background: var(--surface); border: 1px solid var(--line); border-top: 3px solid var(--accent); border-radius: .8rem; box-shadow: 0 5px 12px rgb(20 43 37 / 5%); }
 .profile-identity { display: flex; align-items: center; min-width: 0; gap: .85rem; }
 .avatar-frame { position: relative; display: grid; place-items: center; flex: none; background: var(--tint); width: 4.5rem; height: 4.5rem; border-radius: 1rem; overflow: hidden; }
@@ -76,9 +81,10 @@ button:disabled:hover { background: var(--tint); }
 .profile-login { color: var(--muted); margin: .2rem 0 0; font-size: .85rem; overflow-wrap: anywhere; }
 .profile-badge { align-self: flex-start; margin-left: auto; border: 1px solid #ceded3; color: var(--accent); background: var(--tint); padding: .1rem .45rem; border-radius: .3rem; font-size: .66rem; letter-spacing: .07em; font-weight: 800; }
 .profile-bio { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); margin: 1.2rem 0 0; font-size: .94rem; }
-.profile-source { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .4rem 1rem; border-top: 1px solid var(--line); padding-top: .85rem; margin-top: 1.25rem; font-size: .8rem; }
-.release-link { font-weight: 650; text-decoration: none; }
-.release-link:hover { text-decoration: underline; }
+.profile-source { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .6rem 1rem; border-top: 1px solid var(--line); padding-top: .85rem; margin-top: 1.25rem; font-size: .8rem; }
+.profile-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
+.profile-actions a { display: inline-flex; align-items: center; padding: .35rem .7rem; border: 1px solid #c1d1c5; border-radius: 999px; background: var(--tint); color: var(--accent); font: 600 .8rem/1.5 var(--sans); text-decoration: none; white-space: nowrap; }
+.profile-actions a:hover { background: #d2e5d8; color: var(--accent-dark); }
 .profile-source time { color: var(--muted); }
 .source-note { margin: 1.8rem 0 2rem; color: var(--muted); font-size: .8rem; }
 .pagination { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: .65rem; padding: 1.25rem 0 2rem; border-top: 1px solid var(--line); font-size: .8rem; }

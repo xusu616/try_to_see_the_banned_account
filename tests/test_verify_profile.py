@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
 
 from scripts.verify_profile import (
+    BATCH_MARKER,
     MENTIONS_END,
     MENTIONS_START,
     RELEASE_URL,
@@ -16,8 +17,10 @@ from scripts.verify_profile import (
     ProfileRequest,
     VerificationError,
     add_mention,
+    create_profile_release,
     is_avatar_url,
     is_profile_url,
+    is_release_url,
     load_request,
     make_result,
     observe_profile,
@@ -25,6 +28,8 @@ from scripts.verify_profile import (
     previous_result,
     profile_page_status,
     read_hovercard,
+    release_catalog,
+    release_members,
     result_body,
     run_verification,
     update_release,
@@ -45,6 +50,14 @@ def issue(login="rD227", body=None):
 def comment(request, author="github-actions[bot]", kind="Bot", status="verified"):
     result = make_result(request, {"status": status, "message": "Observed publicly.", "profilePageStatus": 404})
     return {"id": 100, "user": {"login": author, "type": kind}, "body": result_body(result)}
+
+
+def release(tag="v0.1.1", logins=()):
+    body = "" if tag == "v0.1.1" else BATCH_MARKER
+    for login in logins:
+        body = add_mention(body, login)
+    return {"id": int(tag.rsplit(".", 1)[1]), "tag_name": tag, "draft": False,
+            "html_url": f"https://github.com/{REPOSITORY}/releases/tag/{tag}", "body": body}
 
 
 class RequestTests(unittest.TestCase):
@@ -93,6 +106,46 @@ class RequestTests(unittest.TestCase):
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_six_account_limit_counts_distinct_logins_and_preserves_existing_slot(self):
+        client = Mock()
+        client.request.return_value = release(logins=[f"user{i}" for i in range(6)])
+        with self.assertRaisesRegex(VerificationError, "six accounts"):
+            update_release(client, "seventh")
+        client.request.assert_called_once()
+        client.reset_mock()
+        update_release(client, "USER0")
+        client.request.assert_called_once()
+        self.assertEqual(len(release_members(client.request.return_value)), 6)
+
+    def test_catalog_sorts_numeric_versions_and_reserves_unrelated_releases(self):
+        client = Mock()
+        other = {**release("v0.1.11"), "body": "CLI release"}
+        client.request.return_value = [release(), release("v0.1.2"), release("v0.1.10"), other]
+        managed, occupied = release_catalog(client)
+        self.assertEqual([item["tag_name"] for item in managed], ["v0.1.10", "v0.1.2", "v0.1.1"])
+        self.assertEqual(occupied, {1, 2, 10, 11})
+
+    def test_create_increments_patch_and_keeps_cli_latest_unchanged(self):
+        client = Mock()
+        client.request.side_effect = [None, release("v0.1.2", ["seventh"])]
+        created = create_profile_release(client, "seventh", {1})
+        self.assertEqual(created["tag_name"], "v0.1.2")
+        method, path, payload = client.request.call_args.args
+        self.assertEqual((method, path), ("POST", "/releases"))
+        self.assertEqual(payload["tag_name"], "v0.1.2")
+        self.assertEqual(payload["make_latest"], "false")
+        self.assertIn("@seventh", payload["body"])
+
+    def test_create_skips_existing_tag_without_overwriting_it(self):
+        client = Mock()
+        client.request.side_effect = [{"ref": "refs/tags/v0.1.2"}, None, release("v0.1.3", ["seventh"])]
+        self.assertEqual(create_profile_release(client, "seventh", {1})["tag_name"], "v0.1.3")
+
+    def test_source_url_accepts_managed_version_series_only(self):
+        self.assertTrue(is_release_url(release("v0.1.10")["html_url"]))
+        for url in (RELEASE_URL + "?bad=1", RELEASE_URL.replace(REPOSITORY, "other/repo"), RELEASE_URL.replace("v0.1.1", "v0.1.0")):
+            self.assertFalse(is_release_url(url))
+
     def test_preserves_release_notes_and_adds_owned_section(self):
         original = "# v0.1.1\r\n\r\nOriginal notes, links, and @other-user.\r\n"
         updated = add_mention(original, "rD227")
@@ -356,6 +409,11 @@ class ResultTests(unittest.TestCase):
 
 
 class ObserveTests(unittest.TestCase):
+    def setUp(self):
+        catalog_patch = patch("scripts.verify_profile.release_catalog", return_value=([release()], {1}))
+        self.catalog = catalog_patch.start()
+        self.addCleanup(catalog_patch.stop)
+
     def browser(self, hrefs):
         page = Mock()
         page.url = RELEASE_URL
@@ -367,7 +425,7 @@ class ObserveTests(unittest.TestCase):
             link = Mock()
             link.get_attribute.return_value = href
             entries.append(link)
-        links.nth.side_effect = entries
+        links.nth.side_effect = lambda index: entries[index]
         playwright = Mock()
         playwright.chromium.launch.return_value.new_page.return_value = page
         manager = Mock()
@@ -395,6 +453,56 @@ class ObserveTests(unittest.TestCase):
         self.assertEqual(result["status"], "unavailable")
         self.assertEqual(order[:2], ["read", "edit"])
         self.assertEqual(update.call_count, 1)
+
+    def test_seventh_account_allocates_next_release_and_records_actual_source(self):
+        full = release(logins=[f"user{i}" for i in range(6)])
+        self.catalog.return_value = ([full], {1})
+        page, module = self.browser([])
+        created = release("v0.1.2", ["seventh"])
+        def navigate(url, **kwargs):
+            page.url = url
+            return Mock(status=200)
+        page.goto.side_effect = navigate
+        with patch.dict(sys.modules, {"playwright.sync_api": module}), patch("scripts.verify_profile.create_profile_release", return_value=created) as create, patch("scripts.verify_profile.update_release") as update:
+            result = observe_profile("seventh", Mock())
+        create.assert_called_once()
+        update.assert_not_called()
+        self.assertEqual(result["releaseUrl"], created["html_url"])
+        self.assertEqual(page.goto.call_args.args[0], created["html_url"])
+
+    def test_existing_account_reuses_full_release_and_reads_its_link(self):
+        full = release("v0.1.2", ["rD227", *[f"user{i}" for i in range(5)]])
+        self.catalog.return_value = ([full, release()], {1, 2})
+        page, module = self.browser(["/rD227"])
+        page.url = full["html_url"]
+        with patch.dict(sys.modules, {"playwright.sync_api": module}), patch("scripts.verify_profile.create_profile_release") as create, patch("scripts.verify_profile.update_release") as update, patch("scripts.verify_profile.read_hovercard", return_value={"bio": "first\nsecond"}):
+            result = observe_profile("rD227", Mock())
+        create.assert_not_called()
+        update.assert_not_called()
+        self.assertEqual(result["releaseUrl"], full["html_url"])
+        page.goto.assert_called_once()
+
+    def test_sixth_account_uses_current_release_without_creating_another(self):
+        self.catalog.return_value = ([release(logins=[f"user{i}" for i in range(5)])], {1})
+        page, module = self.browser([])
+        with patch.dict(sys.modules, {"playwright.sync_api": module}), patch("scripts.verify_profile.create_profile_release") as create, patch("scripts.verify_profile.update_release") as update:
+            result = observe_profile("sixth", Mock())
+        create.assert_not_called()
+        self.assertEqual(update.call_args.args[1:3], ("sixth", "v0.1.1"))
+        self.assertEqual(result["releaseUrl"], RELEASE_URL)
+
+    def test_visible_contributors_also_count_toward_capacity(self):
+        page, module = self.browser([f"/user{i}" for i in range(6)])
+        created = release("v0.1.2", ["seventh"])
+        def navigate(url, **kwargs):
+            page.url = url
+            return Mock(status=200)
+        page.goto.side_effect = navigate
+        with patch.dict(sys.modules, {"playwright.sync_api": module}), patch("scripts.verify_profile.create_profile_release", return_value=created) as create, patch("scripts.verify_profile.update_release") as update:
+            result = observe_profile("seventh", Mock())
+        create.assert_called_once()
+        update.assert_not_called()
+        self.assertEqual(result["releaseUrl"], created["html_url"])
 
 
 if __name__ == "__main__":
