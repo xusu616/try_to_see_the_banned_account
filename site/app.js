@@ -329,7 +329,7 @@ function renderGallery() {
   const options = Array.from({ length: pageCount }, (_, index) => {
     const option = document.createElement("option");
     option.value = String(index + 1);
-    option.textContent = `第 ${index + 1} 页`;
+    option.textContent = `${index + 1} / ${pageCount}`;
     return option;
   });
   pageSelect.replaceChildren(...options);

@@ -3,6 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)">
   <meta name="description" content="输入 GitHub 用户名，实时核验 Release 页中的公开资料卡。">
   <title>GitHub 资料卡查询</title>
   <link rel="stylesheet" href="./styles.css">
@@ -69,12 +72,13 @@
     <nav id="card-pagination" class="pagination" aria-label="账号卡片分页">
       <button id="previous-page" class="soft-button" type="button" disabled>上一页</button>
       <label for="page-select">页码</label>
-      <select id="page-select" disabled><option value="1">第 1 页</option></select>
+      <select id="page-select" disabled><option value="1">1 / 1</option></select>
       <span id="page-summary" role="status" aria-live="polite">第 1 页</span>
       <button id="next-page" class="soft-button" type="button" disabled>下一页</button>
     </nav>
   </main>
   <template id="card-template">
+    <div class="profile-entry">
     <article class="profile-card">
       <div class="profile-identity">
         <div class="avatar-frame">
@@ -86,13 +90,12 @@
       </div>
       <p class="profile-bio" hidden></p>
       <div class="profile-source">
-        <div class="profile-actions">
-          <a class="profile-source-link" target="_blank" rel="noopener"></a>
-          <a class="card-request-link" target="_blank" rel="noopener" hidden>查看查询请求</a>
-        </div>
-        <time></time>
+        <a class="profile-source-link" target="_blank" rel="noopener"></a>
+        <a class="card-request-link" target="_blank" rel="noopener" hidden>查看查询请求</a>
       </div>
     </article>
+    <time class="profile-date"></time>
+    </div>
   </template>
 </body>
 </html>
